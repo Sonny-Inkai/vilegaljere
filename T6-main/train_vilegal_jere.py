@@ -79,6 +79,12 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
+# Calculate actual vocab size (base vocab + extra_id tokens)
+actual_vocab_size = tokenizer.vocab_size + len(tokenizer.additional_special_tokens)
+print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
+print(f"Additional special tokens: {len(tokenizer.additional_special_tokens)}")
+print(f"Actual total vocab_size: {actual_vocab_size}")
+
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
     n_params = sum(p.numel() for p in model.parameters())
@@ -169,22 +175,29 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     
     # Select random positions for noise spans
     num_nonnoise_tokens = num_tokens - sum(noise_span_lengths)
+    if num_nonnoise_tokens <= 0:
+        return tokens, tokens
+        
     start_positions = sorted(np.random.choice(num_nonnoise_tokens, len(noise_span_lengths), replace=False))
     
     # Create input and target sequences
     input_tokens = []
     target_tokens = []
-    sentinel_id = tokenizer.additional_special_tokens_ids[10]  # <extra_id_0>
+    
+    # Get the base extra_id token (should be around index 10000)
+    # Find the first extra_id token
+    extra_id_start = tokenizer.vocab_size  # This should be 10000
     
     prev_end = 0
     for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input
-        input_tokens.append(sentinel_id + i)
+        # Add sentinel token to input (extra_id_0, extra_id_1, etc.)
+        sentinel_token = extra_id_start + i
+        input_tokens.append(sentinel_token)
         
         # Add sentinel token to target
-        target_tokens.append(sentinel_id + i)
+        target_tokens.append(sentinel_token)
         # Add noise span to target
         target_tokens.extend(tokens[start:start + length])
         
@@ -269,7 +282,7 @@ model_args = dict(
     rank=rank, 
     q_rank=q_rank, 
     using_groupnorm=using_groupnorm,
-    vocab_size=tokenizer.vocab_size,
+    vocab_size=actual_vocab_size,
     dropout=dropout,
     pad_token_id=tokenizer.pad_token_id,
     eos_token_id=tokenizer.eos_token_id,
