@@ -79,20 +79,37 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Calculate actual vocab size - max token ID + 1
-# Base vocab: 0-9999 (10000 tokens)
-# extra_id tokens: 10000-10099 (100 tokens) 
-# Total max ID: 10099, so vocab_size = 10100
-actual_vocab_size = 10100
+# Debug tokenizer thoroughly
 print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
 print(f"Additional special tokens count: {len(tokenizer.additional_special_tokens)}")
-print(f"Actual total vocab_size (max_id + 1): {actual_vocab_size}")
 
-# Debug: Check actual token range
-test_tokens = tokenizer.encode("test", add_special_tokens=True)
+# Check special token IDs
+print(f"pad_token_id: {tokenizer.pad_token_id}")
+print(f"eos_token_id: {tokenizer.eos_token_id}")
+print(f"unk_token_id: {tokenizer.unk_token_id}")
+
+# Check extra_id token IDs
+extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
+print(f"Extra ID tokens found: {len(extra_id_tokens)}")
+if extra_id_tokens:
+    sample_extra_ids = extra_id_tokens[:5]  # First 5
+    for token in sample_extra_ids:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        print(f"  {token} -> {token_id}")
+
+# Find the actual maximum token ID used
+all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens]
+max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids)
+actual_vocab_size = max_token_id + 1
+
+print(f"Max token ID found: {max_token_id}")
+print(f"Calculated vocab_size needed: {actual_vocab_size}")
+
+# Verify with sample encoding
+test_text = "Điều 1. Phạm vi điều chỉnh"
+test_tokens = tokenizer.encode(test_text, add_special_tokens=True)
 print(f"Sample encoding: {test_tokens}")
-print(f"Max regular token should be < {tokenizer.vocab_size}")
-print(f"Extra ID tokens range: 10000-10099")
+print(f"Max token in sample: {max(test_tokens) if test_tokens else 0}")
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -193,9 +210,22 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     input_tokens = []
     target_tokens = []
     
-    # Get the base extra_id token (should be index 10000)
-    extra_id_start = 10000  # Fixed value for extra_id tokens
-    max_extra_id = 10099    # Maximum extra_id token
+    # Get actual extra_id token IDs from tokenizer
+    extra_id_0_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+    
+    # Debug: print once per function call
+    if not hasattr(create_t5_spans, '_debug_printed'):
+        print(f"DEBUG T5 spans: extra_id_0 token ID = {extra_id_0_id}")
+        create_t5_spans._debug_printed = True
+    
+    if extra_id_0_id == tokenizer.unk_token_id:
+        # Fallback: use the maximum special token ID range
+        extra_id_start = max([tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens if '<extra_id_' in token])
+        extra_id_start = extra_id_start - 99  # Go back to extra_id_0
+    else:
+        extra_id_start = extra_id_0_id
+    
+    max_extra_id = extra_id_start + 99  # extra_id_0 to extra_id_99
     
     prev_end = 0
     for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
@@ -218,8 +248,21 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     # Add EOS to target
     target_tokens.append(tokenizer.eos_token_id)
     
-    # Safety check: ensure all tokens are within vocab range (0-10099)
-    max_allowed_id = 10099
+    # Safety check: ensure all tokens are within vocab range
+    max_allowed_id = actual_vocab_size - 1
+    
+    # Debug: check for out-of-range tokens before clamping
+    input_out_of_range = [token for token in input_tokens if token > max_allowed_id]
+    target_out_of_range = [token for token in target_tokens if token > max_allowed_id]
+    
+    if input_out_of_range or target_out_of_range:
+        if not hasattr(create_t5_spans, '_range_warning_shown'):
+            print(f"WARNING: Found out-of-range tokens!")
+            print(f"  Input out-of-range: {input_out_of_range[:5]}")  # Show first 5
+            print(f"  Target out-of-range: {target_out_of_range[:5]}")
+            print(f"  Max allowed ID: {max_allowed_id}")
+            create_t5_spans._range_warning_shown = True
+    
     input_tokens = [min(token, max_allowed_id) for token in input_tokens if token >= 0]
     target_tokens = [min(token, max_allowed_id) for token in target_tokens if token >= 0]
     
@@ -275,7 +318,7 @@ def get_batch(split):
     if split == 'train':
         get_batch._debug_count = getattr(get_batch, '_debug_count', 0) + 1
         if get_batch._debug_count <= 2:  # Only print first 2 batches
-            print(f"DEBUG: Max token in batch: {max_token_seen}, vocab_size: 10100")
+            print(f"DEBUG: Max token in batch: {max_token_seen}, vocab_size: {actual_vocab_size}")
     
     # Convert to tensors
     input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
