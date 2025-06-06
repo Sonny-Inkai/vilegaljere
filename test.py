@@ -1,15 +1,19 @@
 from transformers import AutoTokenizer
 
-# Tải tokenizer
+# Tải tokenizer từ Hugging Face Hub
+# Thư viện sẽ tự động đọc tất cả các file cấu hình liên quan
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Lấy danh sách các special token (dạng chữ)
-special_tokens = tokenizer.all_special_tokens
+# Phương thức len() trên đối tượng tokenizer sẽ trả về tổng số token
+# bao gồm cả từ điển gốc và các token đặc biệt đã được thêm vào.
+total_tokens = len(tokenizer)
 
-# Chuyển danh sách đó thành các ID tương ứng
-special_token_ids = tokenizer.convert_tokens_to_ids(special_tokens)
+# In ra kết quả
+print(f"Tổng số token trong tokenizer 'sonny36/vilegaljere' là: {total_tokens}")
 
-print("Các special token và ID tương ứng:")
-# In ra từng cặp token và ID
-for token, token_id in zip(special_tokens, special_token_ids):
-    print(f"{token}: {token_id}")
+# Để kiểm tra token có ID lớn nhất
+# ID lớn nhất sẽ là total_tokens - 1
+highest_id = total_tokens - 1
+token_with_highest_id = tokenizer.convert_ids_to_tokens(highest_id)
+
+print(f"Token có ID lớn nhất là '{token_with_highest_id}' với ID là: {highest_id}")

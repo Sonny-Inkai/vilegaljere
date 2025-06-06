@@ -79,19 +79,20 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Calculate actual vocab size - use the real vocab size from tokenizer
-actual_vocab_size = len(tokenizer.get_vocab())
-print(f"Tokenizer get_vocab() size: {len(tokenizer.get_vocab())}")
-print(f"Tokenizer vocab_size: {tokenizer.vocab_size}")
-print(f"Additional special tokens: {len(tokenizer.additional_special_tokens)}")
-print(f"Using vocab_size: {actual_vocab_size}")
+# Calculate actual vocab size - max token ID + 1
+# Base vocab: 0-9999 (10000 tokens)
+# extra_id tokens: 10000-10099 (100 tokens) 
+# Total max ID: 10099, so vocab_size = 10100
+actual_vocab_size = 10100
+print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
+print(f"Additional special tokens count: {len(tokenizer.additional_special_tokens)}")
+print(f"Actual total vocab_size (max_id + 1): {actual_vocab_size}")
 
-# Get special token IDs
-pad_token_id = tokenizer.pad_token_id
-eos_token_id = tokenizer.eos_token_id
-print(f"PAD token ID: {pad_token_id}")
-print(f"EOS token ID: {eos_token_id}")
-print(f"Max token ID in vocab: {max(tokenizer.get_vocab().values())}")
+# Debug: Check actual token range
+test_tokens = tokenizer.encode("test", add_special_tokens=True)
+print(f"Sample encoding: {test_tokens}")
+print(f"Max regular token should be < {tokenizer.vocab_size}")
+print(f"Extra ID tokens range: 10000-10099")
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -168,25 +169,22 @@ def load_legal_data():
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     """Create T5-style span corruption for pre-training"""
     num_tokens = len(tokens)
-    if num_tokens < 5:  # Too short
-        return tokens, tokens
-        
-    num_noise_tokens = max(1, int(round(num_tokens * noise_density)))
+    num_noise_tokens = int(round(num_tokens * noise_density))
     
     # Create noise spans
     noise_span_lengths = np.random.poisson(mean_noise_span_length, size=num_noise_tokens)
-    noise_span_lengths = [max(1, min(length, 5)) for length in noise_span_lengths]  # Cap max length
+    noise_span_lengths = [max(1, length) for length in noise_span_lengths]
     
     # Adjust if total noise exceeds tokens
     while sum(noise_span_lengths) > num_tokens * 0.3:
         noise_span_lengths = noise_span_lengths[:-1]
     
-    if not noise_span_lengths or sum(noise_span_lengths) >= num_tokens:
+    if not noise_span_lengths:
         return tokens, tokens
     
     # Select random positions for noise spans
     num_nonnoise_tokens = num_tokens - sum(noise_span_lengths)
-    if num_nonnoise_tokens <= len(noise_span_lengths):
+    if num_nonnoise_tokens <= 0:
         return tokens, tokens
         
     start_positions = sorted(np.random.choice(num_nonnoise_tokens, len(noise_span_lengths), replace=False))
@@ -195,21 +193,21 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     input_tokens = []
     target_tokens = []
     
-    # Use extra_id tokens safely - get their actual IDs from tokenizer
-    extra_id_tokens = [tokenizer.convert_tokens_to_ids(f'<extra_id_{i}>') for i in range(len(noise_span_lengths))]
+    # Get the base extra_id token (should be index 10000)
+    extra_id_start = 10000  # Fixed value for extra_id tokens
+    max_extra_id = 10099    # Maximum extra_id token
     
     prev_end = 0
     for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
-        if i >= len(extra_id_tokens):
-            break
-            
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input
-        input_tokens.append(extra_id_tokens[i])
+        # Add sentinel token to input (extra_id_0, extra_id_1, etc.)
+        # Ensure we don't exceed available extra_id tokens
+        sentinel_token = min(extra_id_start + i, max_extra_id)
+        input_tokens.append(sentinel_token)
         
         # Add sentinel token to target
-        target_tokens.append(extra_id_tokens[i])
+        target_tokens.append(sentinel_token)
         # Add noise span to target
         target_tokens.extend(tokens[start:start + length])
         
@@ -218,7 +216,12 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     # Add remaining tokens to input
     input_tokens.extend(tokens[prev_end:])
     # Add EOS to target
-    target_tokens.append(eos_token_id)
+    target_tokens.append(tokenizer.eos_token_id)
+    
+    # Safety check: ensure all tokens are within vocab range (0-10099)
+    max_allowed_id = 10099
+    input_tokens = [min(token, max_allowed_id) for token in input_tokens if token >= 0]
+    target_tokens = [min(token, max_allowed_id) for token in target_tokens if token >= 0]
     
     return input_tokens, target_tokens
 
@@ -227,28 +230,10 @@ print("Loading Vietnamese legal data...")
 tokenized_data = load_legal_data()
 print(f"Loaded {len(tokenized_data)} legal articles")
 
-# Validate all tokenized data
-max_token_id = actual_vocab_size - 1
-print(f"Validating tokens with max_id: {max_token_id}")
-
-validated_data = []
-for tokens in tokenized_data:
-    validated_tokens = validate_and_clip_tokens(tokens, max_token_id)
-    if len(validated_tokens) > 5:  # Keep reasonable length sequences
-        validated_data.append(validated_tokens)
-
-print(f"After validation: {len(validated_data)} articles")
-
 # Split train/val
-split_idx = int(0.95 * len(validated_data))
-train_data = validated_data[:split_idx]
-val_data = validated_data[split_idx:]
-
-def validate_and_clip_tokens(tokens, max_id):
-    """Validate and clip token IDs to prevent out-of-range errors"""
-    # Clip tokens to valid range [0, max_id]
-    tokens = [max(0, min(token, max_id)) for token in tokens]
-    return tokens
+split_idx = int(0.95 * len(tokenized_data))
+train_data = tokenized_data[:split_idx]
+val_data = tokenized_data[split_idx:]
 
 def get_batch(split):
     """Get batch for T5 training"""
@@ -258,51 +243,44 @@ def get_batch(split):
     batch_decoder_input_ids = []
     batch_labels = []
     
-    max_token_id = actual_vocab_size - 1
+    # Debug: Track token ranges
+    max_token_seen = 0
     
     for _ in range(batch_size):
         # Random article
         article_tokens = data[np.random.randint(len(data))]
         
-        # Validate original tokens
-        article_tokens = validate_and_clip_tokens(article_tokens, max_token_id)
-        
         # Create T5 span corruption
         input_tokens, target_tokens = create_t5_spans(article_tokens)
-        
-        # Validate generated tokens
-        input_tokens = validate_and_clip_tokens(input_tokens, max_token_id)
-        target_tokens = validate_and_clip_tokens(target_tokens, max_token_id)
         
         # Truncate to max lengths
         input_tokens = input_tokens[:max_source_length]
         target_tokens = target_tokens[:max_target_length]
         
         # Pad sequences
-        input_tokens += [pad_token_id] * (max_source_length - len(input_tokens))
-        target_tokens += [pad_token_id] * (max_target_length - len(target_tokens))
+        input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+        target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
         
         # Decoder input (shift right)
-        decoder_input = [pad_token_id] + target_tokens[:-1]
+        decoder_input = [tokenizer.pad_token_id] + target_tokens[:-1]
         
-        # Final validation
-        input_tokens = validate_and_clip_tokens(input_tokens, max_token_id)
-        decoder_input = validate_and_clip_tokens(decoder_input, max_token_id)
-        target_tokens = validate_and_clip_tokens(target_tokens, max_token_id)
+        # Track max token for debugging
+        max_token_seen = max(max_token_seen, max(input_tokens + decoder_input + target_tokens, default=0))
         
         batch_input_ids.append(input_tokens)
         batch_decoder_input_ids.append(decoder_input)
         batch_labels.append(target_tokens)
     
+    # Debug output for first few batches
+    if split == 'train':
+        get_batch._debug_count = getattr(get_batch, '_debug_count', 0) + 1
+        if get_batch._debug_count <= 2:  # Only print first 2 batches
+            print(f"DEBUG: Max token in batch: {max_token_seen}, vocab_size: 10100")
+    
     # Convert to tensors
     input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
     decoder_input_ids = torch.tensor(batch_decoder_input_ids, dtype=torch.long)
     labels = torch.tensor(batch_labels, dtype=torch.long)
-    
-    # Final safety check
-    input_ids = torch.clamp(input_ids, 0, max_token_id)
-    decoder_input_ids = torch.clamp(decoder_input_ids, 0, max_token_id)
-    labels = torch.clamp(labels, 0, max_token_id)
     
     # Move to device
     if device_type == 'cuda':
@@ -333,9 +311,9 @@ model_args = dict(
     using_groupnorm=using_groupnorm,
     vocab_size=actual_vocab_size,
     dropout=dropout,
-    pad_token_id=pad_token_id,
-    eos_token_id=eos_token_id,
-    decoder_start_token_id=pad_token_id
+    pad_token_id=tokenizer.pad_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    decoder_start_token_id=tokenizer.pad_token_id
 )
 
 if init_from == 'scratch':
@@ -364,7 +342,7 @@ if master_process:
     os.makedirs(out_dir, exist_ok=True)
 
 # Initialize scaler and optimizer
-scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
