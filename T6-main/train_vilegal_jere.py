@@ -98,12 +98,23 @@ if extra_id_tokens:
         print(f"  {token} -> {token_id}")
 
 # Find the actual maximum token ID used
-all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens]
-max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids)
+all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
+max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids) if all_special_token_ids else tokenizer.vocab_size - 1
 actual_vocab_size = max_token_id + 1
 
 print(f"Max token ID found: {max_token_id}")
 print(f"Calculated vocab_size needed: {actual_vocab_size}")
+
+# Get valid extra_id token range
+extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
+extra_id_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in extra_id_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
+if extra_id_token_ids:
+    min_extra_id = min(extra_id_token_ids)
+    max_extra_id = max(extra_id_token_ids)
+    print(f"Valid extra_id range: {min_extra_id} to {max_extra_id}")
+else:
+    min_extra_id = max_extra_id = None
+    print("No valid extra_id tokens found")
 
 # Verify with sample encoding
 test_text = "Điều 1. Phạm vi điều chỉnh"
@@ -210,30 +221,26 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     input_tokens = []
     target_tokens = []
     
-    # Get actual extra_id token IDs from tokenizer
-    extra_id_0_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-    
-    # Debug: print once per function call
-    if not hasattr(create_t5_spans, '_debug_printed'):
-        print(f"DEBUG T5 spans: extra_id_0 token ID = {extra_id_0_id}")
-        create_t5_spans._debug_printed = True
-    
-    if extra_id_0_id == tokenizer.unk_token_id:
-        # Fallback: use the maximum special token ID range
-        extra_id_start = max([tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens if '<extra_id_' in token])
-        extra_id_start = extra_id_start - 99  # Go back to extra_id_0
+    # Use valid extra_id tokens or fallback to special tokens
+    if max_extra_id is not None:
+        # Use actual extra_id tokens from tokenizer
+        available_sentinels = list(range(min_extra_id, max_extra_id + 1))
     else:
-        extra_id_start = extra_id_0_id
+        # Fallback: use a range of special tokens that we know exist
+        # Use tokens near the end of vocab but before actual_vocab_size
+        fallback_start = actual_vocab_size - 200
+        available_sentinels = list(range(fallback_start, actual_vocab_size - 1))
     
-    max_extra_id = extra_id_start + 99  # extra_id_0 to extra_id_99
+    # Limit sentinels to what we actually need
+    max_sentinels_needed = min(len(noise_span_lengths), len(available_sentinels))
+    sentinels = available_sentinels[:max_sentinels_needed]
     
     prev_end = 0
-    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
+    for i, (start, length) in enumerate(zip(start_positions[:max_sentinels_needed], noise_span_lengths[:max_sentinels_needed])):
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input (extra_id_0, extra_id_1, etc.)
-        # Ensure we don't exceed available extra_id tokens
-        sentinel_token = min(extra_id_start + i, max_extra_id)
+        # Add sentinel token to input
+        sentinel_token = sentinels[i]
         input_tokens.append(sentinel_token)
         
         # Add sentinel token to target
@@ -246,25 +253,21 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     # Add remaining tokens to input
     input_tokens.extend(tokens[prev_end:])
     # Add EOS to target
-    target_tokens.append(tokenizer.eos_token_id)
+    if tokenizer.eos_token_id is not None:
+        target_tokens.append(tokenizer.eos_token_id)
     
-    # Safety check: ensure all tokens are within vocab range
+    # Strict safety check: ensure all tokens are within vocab range
     max_allowed_id = actual_vocab_size - 1
     
-    # Debug: check for out-of-range tokens before clamping
-    input_out_of_range = [token for token in input_tokens if token > max_allowed_id]
-    target_out_of_range = [token for token in target_tokens if token > max_allowed_id]
+    # Filter out any invalid tokens completely
+    input_tokens = [token for token in input_tokens if 0 <= token <= max_allowed_id]
+    target_tokens = [token for token in target_tokens if 0 <= token <= max_allowed_id]
     
-    if input_out_of_range or target_out_of_range:
-        if not hasattr(create_t5_spans, '_range_warning_shown'):
-            print(f"WARNING: Found out-of-range tokens!")
-            print(f"  Input out-of-range: {input_out_of_range[:5]}")  # Show first 5
-            print(f"  Target out-of-range: {target_out_of_range[:5]}")
-            print(f"  Max allowed ID: {max_allowed_id}")
-            create_t5_spans._range_warning_shown = True
-    
-    input_tokens = [min(token, max_allowed_id) for token in input_tokens if token >= 0]
-    target_tokens = [min(token, max_allowed_id) for token in target_tokens if token >= 0]
+    # Ensure we have valid sequences
+    if not input_tokens:
+        input_tokens = tokens[:min(len(tokens), max_source_length)]
+    if not target_tokens:
+        target_tokens = tokens[:min(len(tokens), max_target_length)]
     
     return input_tokens, target_tokens
 
@@ -286,9 +289,6 @@ def get_batch(split):
     batch_decoder_input_ids = []
     batch_labels = []
     
-    # Debug: Track token ranges
-    max_token_seen = 0
-    
     for _ in range(batch_size):
         # Random article
         article_tokens = data[np.random.randint(len(data))]
@@ -300,25 +300,22 @@ def get_batch(split):
         input_tokens = input_tokens[:max_source_length]
         target_tokens = target_tokens[:max_target_length]
         
-        # Pad sequences
-        input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
-        target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
+        # Final safety check before padding
+        max_allowed_id = actual_vocab_size - 1
+        input_tokens = [min(max(token, 0), max_allowed_id) for token in input_tokens]
+        target_tokens = [min(max(token, 0), max_allowed_id) for token in target_tokens]
+        
+        # Pad sequences with safe pad token
+        pad_token = min(tokenizer.pad_token_id, max_allowed_id) if tokenizer.pad_token_id is not None else 0
+        input_tokens += [pad_token] * (max_source_length - len(input_tokens))
+        target_tokens += [pad_token] * (max_target_length - len(target_tokens))
         
         # Decoder input (shift right)
-        decoder_input = [tokenizer.pad_token_id] + target_tokens[:-1]
-        
-        # Track max token for debugging
-        max_token_seen = max(max_token_seen, max(input_tokens + decoder_input + target_tokens, default=0))
+        decoder_input = [pad_token] + target_tokens[:-1]
         
         batch_input_ids.append(input_tokens)
         batch_decoder_input_ids.append(decoder_input)
         batch_labels.append(target_tokens)
-    
-    # Debug output for first few batches
-    if split == 'train':
-        get_batch._debug_count = getattr(get_batch, '_debug_count', 0) + 1
-        if get_batch._debug_count <= 2:  # Only print first 2 batches
-            print(f"DEBUG: Max token in batch: {max_token_seen}, vocab_size: {actual_vocab_size}")
     
     # Convert to tensors
     input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
@@ -354,9 +351,9 @@ model_args = dict(
     using_groupnorm=using_groupnorm,
     vocab_size=actual_vocab_size,
     dropout=dropout,
-    pad_token_id=tokenizer.pad_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-    decoder_start_token_id=tokenizer.pad_token_id
+    pad_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0,
+    eos_token_id=min(tokenizer.eos_token_id, actual_vocab_size - 1) if tokenizer.eos_token_id is not None else 1,
+    decoder_start_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0
 )
 
 if init_from == 'scratch':
