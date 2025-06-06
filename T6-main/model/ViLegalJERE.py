@@ -217,7 +217,7 @@ class ViLegalDecoderBlock(nn.Module):
 @dataclass
 class ViLegalConfig(PretrainedConfig):
     model_type = "vilegal_jere"
-    vocab_size: int = 64000
+    vocab_size: int = 10100
     n_layer: int = 12
     n_head: int = 16
     head_dim: int = 64

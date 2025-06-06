@@ -385,7 +385,7 @@ if master_process:
     os.makedirs(out_dir, exist_ok=True)
 
 # Initialize scaler and optimizer
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
 
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)

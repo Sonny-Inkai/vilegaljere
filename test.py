@@ -11,9 +11,8 @@ total_tokens = len(tokenizer)
 # In ra kết quả
 print(f"Tổng số token trong tokenizer 'sonny36/vilegaljere' là: {total_tokens}")
 
-# Để kiểm tra token có ID lớn nhất
-# ID lớn nhất sẽ là total_tokens - 1
-highest_id = total_tokens - 1
-token_with_highest_id = tokenizer.convert_ids_to_tokens(highest_id)
+all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens]
+max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids)
+actual_vocab_size = max_token_id + 1
 
-print(f"Token có ID lớn nhất là '{token_with_highest_id}' với ID là: {highest_id}")
+print(actual_vocab_size)
