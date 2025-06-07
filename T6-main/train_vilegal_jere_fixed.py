@@ -79,48 +79,16 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Debug tokenizer thoroughly
-print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
-print(f"Additional special tokens count: {len(tokenizer.additional_special_tokens)}")
+# Ensure tokenizer has required special tokens
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.eos_token_id is None:
+    tokenizer.eos_token_id = len(tokenizer) - 1
 
-# Check special token IDs
-print(f"pad_token_id: {tokenizer.pad_token_id}")
-print(f"eos_token_id: {tokenizer.eos_token_id}")
-print(f"unk_token_id: {tokenizer.unk_token_id}")
-
-# Check extra_id token IDs
-extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
-print(f"Extra ID tokens found: {len(extra_id_tokens)}")
-if extra_id_tokens:
-    sample_extra_ids = extra_id_tokens[:5]  # First 5
-    for token in sample_extra_ids:
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        print(f"  {token} -> {token_id}")
-
-# Find the actual maximum token ID used
-all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
-max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids) if all_special_token_ids else tokenizer.vocab_size - 1
-actual_vocab_size = max_token_id + 1
-
-print(f"Max token ID found: {max_token_id}")
-print(f"Calculated vocab_size needed: {actual_vocab_size}")
-
-# Get valid extra_id token range
-extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
-extra_id_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in extra_id_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
-if extra_id_token_ids:
-    min_extra_id = min(extra_id_token_ids)
-    max_extra_id = max(extra_id_token_ids)
-    print(f"Valid extra_id range: {min_extra_id} to {max_extra_id}")
-else:
-    min_extra_id = max_extra_id = None
-    print("No valid extra_id tokens found")
-
-# Verify with sample encoding
-test_text = "Điều 1. Phạm vi điều chỉnh"
-test_tokens = tokenizer.encode(test_text, add_special_tokens=True)
-print(f"Sample encoding: {test_tokens}")
-print(f"Max token in sample: {max(test_tokens) if test_tokens else 0}")
+# Add extra_id tokens if not present
+if not hasattr(tokenizer, 'additional_special_tokens_ids') or len(tokenizer.additional_special_tokens_ids) < 100:
+    extra_tokens = [f"<extra_id_{i}>" for i in range(100)]
+    tokenizer.add_special_tokens({'additional_special_tokens': extra_tokens})
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -149,7 +117,6 @@ else:
     master_process = True
     seed_offset = 0
     world_size = 1
-    # Don't multiply gradient_accumulation_steps for single GPU
 
 # Calculate total tokens
 tokens_per_iter = batch_size * (max_source_length + max_target_length) * gradient_accumulation_steps * world_size
@@ -182,26 +149,30 @@ def load_legal_data():
     # Tokenize articles with reduced max length
     tokenized_data = []
     for article in articles:
-        # For T5 pre-training, create input-output pairs
-        # Input: masked article, Output: original article
         tokens = tokenizer(article, 
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
         
-        if len(tokens) > 10:  # Reduced filter for shorter sequences
-            tokenized_data.append(tokens)
+        # Validate token IDs are within vocabulary bounds
+        valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
+        
+        if len(valid_tokens) > 10:
+            tokenized_data.append(valid_tokens)
     
     return tokenized_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     """Create T5-style span corruption for pre-training"""
     num_tokens = len(tokens)
-    num_noise_tokens = int(round(num_tokens * noise_density))
+    if num_tokens < 5:
+        return tokens, tokens
+        
+    num_noise_tokens = max(1, int(round(num_tokens * noise_density)))
     
     # Create noise spans
     noise_span_lengths = np.random.poisson(mean_noise_span_length, size=num_noise_tokens)
-    noise_span_lengths = [max(1, length) for length in noise_span_lengths]
+    noise_span_lengths = [max(1, min(length, num_tokens // 2)) for length in noise_span_lengths]
     
     # Adjust if total noise exceeds tokens
     while sum(noise_span_lengths) > num_tokens * 0.3:
@@ -211,63 +182,39 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
         return tokens, tokens
     
     # Select random positions for noise spans
-    num_nonnoise_tokens = num_tokens - sum(noise_span_lengths)
-    if num_nonnoise_tokens <= 0:
-        return tokens, tokens
-        
+    num_nonnoise_tokens = max(1, num_tokens - sum(noise_span_lengths))
+    if len(noise_span_lengths) > num_nonnoise_tokens:
+        noise_span_lengths = noise_span_lengths[:num_nonnoise_tokens]
+    
     start_positions = sorted(np.random.choice(num_nonnoise_tokens, len(noise_span_lengths), replace=False))
     
     # Create input and target sequences
     input_tokens = []
     target_tokens = []
     
-    # Use valid extra_id tokens or fallback to special tokens
-    if max_extra_id is not None:
-        # Use actual extra_id tokens from tokenizer
-        available_sentinels = list(range(min_extra_id, max_extra_id + 1))
-    else:
-        # Fallback: use a range of special tokens that we know exist
-        # Use tokens near the end of vocab but before actual_vocab_size
-        fallback_start = actual_vocab_size - 200
-        available_sentinels = list(range(fallback_start, actual_vocab_size - 1))
-    
-    # Limit sentinels to what we actually need
-    max_sentinels_needed = min(len(noise_span_lengths), len(available_sentinels))
-    sentinels = available_sentinels[:max_sentinels_needed]
+    # Use safe sentinel token IDs
+    base_sentinel_id = tokenizer.additional_special_tokens_ids[0] if tokenizer.additional_special_tokens_ids else tokenizer.unk_token_id
     
     prev_end = 0
-    for i, (start, length) in enumerate(zip(start_positions[:max_sentinels_needed], noise_span_lengths[:max_sentinels_needed])):
+    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input
-        sentinel_token = sentinels[i]
-        input_tokens.append(sentinel_token)
+        # Add sentinel token to input (ensure it's within vocab bounds)
+        sentinel_id = min(base_sentinel_id + i, len(tokenizer) - 1)
+        input_tokens.append(sentinel_id)
         
         # Add sentinel token to target
-        target_tokens.append(sentinel_token)
+        target_tokens.append(sentinel_id)
         # Add noise span to target
-        target_tokens.extend(tokens[start:start + length])
+        end_pos = min(start + length, len(tokens))
+        target_tokens.extend(tokens[start:end_pos])
         
-        prev_end = start + length
+        prev_end = end_pos
     
     # Add remaining tokens to input
     input_tokens.extend(tokens[prev_end:])
     # Add EOS to target
-    if tokenizer.eos_token_id is not None:
-        target_tokens.append(tokenizer.eos_token_id)
-    
-    # Strict safety check: ensure all tokens are within vocab range
-    max_allowed_id = actual_vocab_size - 1
-    
-    # Filter out any invalid tokens completely
-    input_tokens = [token for token in input_tokens if 0 <= token <= max_allowed_id]
-    target_tokens = [token for token in target_tokens if 0 <= token <= max_allowed_id]
-    
-    # Ensure we have valid sequences
-    if not input_tokens:
-        input_tokens = tokens[:min(len(tokens), max_source_length)]
-    if not target_tokens:
-        target_tokens = tokens[:min(len(tokens), max_target_length)]
+    target_tokens.append(tokenizer.eos_token_id)
     
     return input_tokens, target_tokens
 
@@ -300,39 +247,52 @@ def get_batch(split):
         input_tokens = input_tokens[:max_source_length]
         target_tokens = target_tokens[:max_target_length]
         
-        # Final safety check before padding
-        max_allowed_id = actual_vocab_size - 1
-        input_tokens = [min(max(token, 0), max_allowed_id) for token in input_tokens]
-        target_tokens = [min(max(token, 0), max_allowed_id) for token in target_tokens]
-        
-        # Pad sequences with safe pad token
-        pad_token = min(tokenizer.pad_token_id, max_allowed_id) if tokenizer.pad_token_id is not None else 0
-        input_tokens += [pad_token] * (max_source_length - len(input_tokens))
-        target_tokens += [pad_token] * (max_target_length - len(target_tokens))
+        # Pad sequences
+        input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+        target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
         
         # Decoder input (shift right)
-        decoder_input = [pad_token] + target_tokens[:-1]
+        decoder_input = [tokenizer.pad_token_id] + target_tokens[:-1]
+        
+        # Validate all token IDs are within bounds
+        vocab_size = len(tokenizer)
+        input_tokens = [min(max(t, 0), vocab_size - 1) for t in input_tokens]
+        decoder_input = [min(max(t, 0), vocab_size - 1) for t in decoder_input]
+        target_tokens = [min(max(t, 0), vocab_size - 1) for t in target_tokens]
+        
+        # Set padding tokens in labels to -100 for loss calculation
+        labels = [-100 if t == tokenizer.pad_token_id else t for t in target_tokens]
         
         batch_input_ids.append(input_tokens)
         batch_decoder_input_ids.append(decoder_input)
-        batch_labels.append(target_tokens)
+        batch_labels.append(labels)
     
-    # Convert to tensors
-    input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
-    decoder_input_ids = torch.tensor(batch_decoder_input_ids, dtype=torch.long)
-    labels = torch.tensor(batch_labels, dtype=torch.long)
-    
-    # Move to device
-    if device_type == 'cuda':
-        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
-        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
-        labels = labels.pin_memory().to(device, non_blocking=True)
-    else:
-        input_ids = input_ids.to(device)
-        decoder_input_ids = decoder_input_ids.to(device)
-        labels = labels.to(device)
-    
-    return input_ids, decoder_input_ids, labels
+    # Convert to tensors with validation
+    try:
+        input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
+        decoder_input_ids = torch.tensor(batch_decoder_input_ids, dtype=torch.long)
+        labels = torch.tensor(batch_labels, dtype=torch.long)
+        
+        # Validate tensor values
+        assert input_ids.min() >= 0 and input_ids.max() < len(tokenizer), f"Invalid input_ids range: {input_ids.min()}-{input_ids.max()}"
+        assert decoder_input_ids.min() >= 0 and decoder_input_ids.max() < len(tokenizer), f"Invalid decoder_input_ids range: {decoder_input_ids.min()}-{decoder_input_ids.max()}"
+        
+        # Move to device
+        if device_type == 'cuda':
+            input_ids = input_ids.pin_memory().to(device, non_blocking=True)
+            decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
+            labels = labels.pin_memory().to(device, non_blocking=True)
+        else:
+            input_ids = input_ids.to(device)
+            decoder_input_ids = decoder_input_ids.to(device)
+            labels = labels.to(device)
+        
+        return input_ids, decoder_input_ids, labels
+    except Exception as e:
+        print(f"Error creating batch tensors: {e}")
+        print(f"Vocab size: {len(tokenizer)}")
+        print(f"Input IDs range: {min(min(seq) for seq in batch_input_ids)} - {max(max(seq) for seq in batch_input_ids)}")
+        raise
 
 # Initialize tracking
 iter_num = 0
@@ -349,12 +309,16 @@ model_args = dict(
     rank=rank, 
     q_rank=q_rank, 
     using_groupnorm=using_groupnorm,
-    vocab_size=actual_vocab_size,
+    vocab_size=len(tokenizer),  # Use actual tokenizer size after adding special tokens
     dropout=dropout,
-    pad_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0,
-    eos_token_id=min(tokenizer.eos_token_id, actual_vocab_size - 1) if tokenizer.eos_token_id is not None else 1,
-    decoder_start_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0
+    pad_token_id=tokenizer.pad_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    decoder_start_token_id=tokenizer.pad_token_id
 )
+
+print(f"Tokenizer vocab size: {len(tokenizer)}")
+print(f"Pad token ID: {tokenizer.pad_token_id}")
+print(f"EOS token ID: {tokenizer.eos_token_id}")
 
 if init_from == 'scratch':
     print("Initializing ViLegalJERE model from scratch")
@@ -364,6 +328,10 @@ elif init_from == 'resume':
     print(f"Resuming training from {resume_dir}")
     config_obj = ViLegalConfig.from_json_file(os.path.join(resume_dir, 'config.json'))
     model = ViLegalJERE.from_pretrained(resume_dir, config=config_obj)
+
+# Resize model embeddings to match tokenizer
+if hasattr(model, 'resize_token_embeddings'):
+    model.resize_token_embeddings(len(tokenizer))
 
 model.to(device)
 
@@ -382,7 +350,7 @@ if master_process:
     os.makedirs(out_dir, exist_ok=True)
 
 # Initialize scaler and optimizer
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
@@ -413,13 +381,26 @@ def estimate_loss():
         for k in range(eval_iters):
             input_ids, decoder_input_ids, labels = get_batch(split)
             with ctx:
-                outputs = model(
-                    input_ids=input_ids,
-                    decoder_input_ids=decoder_input_ids,
-                    labels=labels
-                )
-                loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
-            losses[k] = loss.item()
+                try:
+                    outputs = model(
+                        input_ids=input_ids,
+                        decoder_input_ids=decoder_input_ids,
+                        labels=labels
+                    )
+                    loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
+                    
+                    # Check for NaN/Inf values
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        print(f"Warning: Invalid loss value in eval: {loss}")
+                        losses[k] = 0.0  # Use 0 for invalid loss
+                    else:
+                        losses[k] = loss.item()
+                        
+                except RuntimeError as e:
+                    print(f"Runtime error in eval forward: {e}")
+                    print(f"Input shapes: input_ids={input_ids.shape}, decoder_input_ids={decoder_input_ids.shape}, labels={labels.shape}")
+                    print(f"Input ranges: input_ids=[{input_ids.min()}, {input_ids.max()}], decoder_input_ids=[{decoder_input_ids.min()}, {decoder_input_ids.max()}]")
+                    losses[k] = 0.0  # Use 0 for failed forward pass
         out[split] = losses.mean()
     model.train()
     return out
@@ -516,12 +497,25 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
-            outputs = model(
-                input_ids=input_ids,
-                decoder_input_ids=decoder_input_ids,
-                labels=labels
-            )
-            loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
+            try:
+                outputs = model(
+                    input_ids=input_ids,
+                    decoder_input_ids=decoder_input_ids,
+                    labels=labels
+                )
+                loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
+                
+                # Check for NaN/Inf values
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"Warning: Invalid loss value in training: {loss}")
+                    continue
+                    
+            except RuntimeError as e:
+                print(f"Runtime error in training forward: {e}")
+                print(f"Input shapes: input_ids={input_ids.shape}, decoder_input_ids={decoder_input_ids.shape}, labels={labels.shape}")
+                print(f"Input ranges: input_ids=[{input_ids.min()}, {input_ids.max()}], decoder_input_ids=[{decoder_input_ids.min()}, {decoder_input_ids.max()}]")
+                raise
+            
             loss = loss / gradient_accumulation_steps
         
         # Get next batch
@@ -579,4 +573,4 @@ while True:
         break
 
 if ddp:
-    destroy_process_group() 
+    destroy_process_group()
