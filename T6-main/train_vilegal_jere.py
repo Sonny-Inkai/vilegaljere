@@ -175,23 +175,16 @@ def load_legal_data():
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Split into articles/sections
-    articles = text.split('Điều ')
-    articles = [f"Điều {art}" for art in articles[1:] if len(art.strip()) > 30]
-    
     # Tokenize articles with reduced max length
     tokenized_data = []
-    for article in articles:
+    for article in text:
         # For T5 pre-training, create input-output pairs
         # Input: masked article, Output: original article
         tokens = tokenizer(article, 
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
-        
-        if len(tokens) > 10:  # Reduced filter for shorter sequences
-            tokenized_data.append(tokens)
-    
+            
     return tokenized_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
