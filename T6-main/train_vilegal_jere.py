@@ -30,8 +30,8 @@ wandb_project = 'ViLegalJERE-T5Small'
 wandb_run_name = 'vilegal_t5small_kaggle'
 # data
 dataset = 'vietnamese_legal'
-gradient_accumulation_steps = 16  # Larger to compensate smaller batch
-batch_size = 4      # Smaller for T4 memory constraints
+gradient_accumulation_steps = 8   # Reduced to avoid memory issues
+batch_size = 2      # Even smaller for T4 memory constraints
 block_size = 512    # Keep same
 max_source_length = 256  # encoder max length
 max_target_length = 256  # decoder max length
@@ -59,7 +59,7 @@ warmup_iters = 2000   # Longer warmup for stability
 lr_decay_iters = 50000
 min_lr = 1e-6
 # DDP settings for Kaggle T4x2
-backend = 'nccl'
+backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
 schedule = 'cosine'
 model_type = 'ViLegalJERE'
 # system
@@ -143,9 +143,12 @@ def load_legal_data():
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Split into articles/sections
+    # Split into articles/sections properly  
     articles = text.split('Điều ')
     articles = [f"Điều {art}" for art in articles[1:] if len(art.strip()) > 30]
+    
+    # Take only first 100 articles for testing
+    articles = articles[:100]
     
     # Tokenize articles with validation
     tokenized_data = []
@@ -158,7 +161,7 @@ def load_legal_data():
         # Validate token IDs are within vocabulary bounds
         valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
         
-        if len(valid_tokens) > 10:  # Only keep articles with meaningful content
+        if len(valid_tokens) > 10:  # Only keep meaningful articles
             tokenized_data.append(valid_tokens)
     
     return tokenized_data
@@ -369,7 +372,7 @@ if compile:
 
 # Wrap with DDP
 if ddp:
-    model = DDP(model, device_ids=[ddp_local_rank])
+    model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
 
 @torch.no_grad()
 def estimate_loss():
@@ -438,7 +441,12 @@ if wandb_log and master_process:
 
 # Training loop
 print(f"Starting training ViLegalJERE with {param_count_m:.1f}M parameters...")
+print(f"Training data size: {len(train_data)}, Val data size: {len(val_data)}")
+print(f"Batch size: {batch_size}, Gradient accumulation: {gradient_accumulation_steps}")
+print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
+
 input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
+print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -451,8 +459,8 @@ while True:
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-    # Evaluation
-    if iter_num % eval_interval == 0 and master_process:
+    # Evaluation (skip first iteration)
+    if iter_num % eval_interval == 0 and master_process and iter_num > 0:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         

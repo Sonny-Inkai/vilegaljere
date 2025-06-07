@@ -155,8 +155,8 @@ class ViLegalSelfAttention(nn.Module):
         
         # Prepare attention mask for scaled_dot_product_attention
         attn_mask = None
-        if attention_mask is not None:
-            # Convert to appropriate shape and dtype
+        if attention_mask is not None and not is_causal:
+            # Only use attention mask for non-causal attention
             if attention_mask.dim() == 2:
                 # Expand for all heads: [B, 1, 1, seq_len]
                 attn_mask = attention_mask.unsqueeze(1).unsqueeze(1)
@@ -350,7 +350,8 @@ class ViLegalJERE(PreTrainedModel):
         loss = None
         
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            # Use pad_token_id as ignore_index instead of -100
+            loss_fct = nn.CrossEntropyLoss(ignore_index=self.config.pad_token_id)
             loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
 
         if not return_dict:
