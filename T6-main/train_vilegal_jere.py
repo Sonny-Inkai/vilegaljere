@@ -142,25 +142,16 @@ def load_legal_data():
     
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
-    
-    # Split into articles/sections
-    articles = text.split('Điều ')
-    # Remove empty articles
-    articles = [art.strip() for art in articles if art.strip()]
-    
+
     # Tokenize articles with validation
     tokenized_data = []
-    for article in articles:
+    for article in text:
         tokens = tokenizer(article, 
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
         
-        # Validate token IDs are within vocabulary bounds
-        valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
-        
-        if len(valid_tokens) > 10:  # Only keep articles with meaningful content
-            tokenized_data.append(valid_tokens)
+        tokenized_data.append(tokens)
     
     return tokenized_data
 
