@@ -79,6 +79,17 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
+# Ensure tokenizer has required special tokens
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.eos_token_id is None:
+    tokenizer.eos_token_id = len(tokenizer) - 1
+
+# Add extra_id tokens if not present
+if not hasattr(tokenizer, 'additional_special_tokens_ids') or len(tokenizer.additional_special_tokens_ids) < 100:
+    extra_tokens = [f"<extra_id_{i}>" for i in range(100)]
+    tokenizer.add_special_tokens({'additional_special_tokens': extra_tokens})
+
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
     n_params = sum(p.numel() for p in model.parameters())
@@ -137,55 +148,73 @@ def load_legal_data():
     # Remove empty articles
     articles = [art.strip() for art in articles if art.strip()]
     
-    # Tokenize articles
+    # Tokenize articles with validation
     tokenized_data = []
-    for article in articles:  # Fixed: iterate over articles, not text
-        # For T5 pre-training, create input-output pairs
-        # Input: masked article, Output: original article
+    for article in articles:
         tokens = tokenizer(article, 
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
         
-        if len(tokens) > 10:  # Only keep articles with meaningful content
-            tokenized_data.append(tokens)
+        # Validate token IDs are within vocabulary bounds
+        valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
+        
+        if len(valid_tokens) > 10:  # Only keep articles with meaningful content
+            tokenized_data.append(valid_tokens)
     
     return tokenized_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     """Create T5-style span corruption for pre-training"""
     num_tokens = len(tokens)
-    num_noise_tokens = int(round(num_tokens * noise_density))
+    if num_tokens < 5:
+        return tokens[:max_source_length], tokens[:max_target_length]
+    
+    num_noise_tokens = max(1, int(round(num_tokens * noise_density)))
     
     # Create noise spans
     noise_span_lengths = np.random.poisson(mean_noise_span_length, size=num_noise_tokens)
-    noise_span_lengths = [max(1, length) for length in noise_span_lengths]
+    noise_span_lengths = [max(1, min(length, num_tokens//2)) for length in noise_span_lengths]
     
-    # Adjust if total noise exceeds tokens
-    while sum(noise_span_lengths) > num_tokens * 0.3:
+    # Adjust if total noise exceeds reasonable limit
+    while sum(noise_span_lengths) > num_tokens * 0.5:
         noise_span_lengths = noise_span_lengths[:-1]
+        if not noise_span_lengths:
+            break
     
     if not noise_span_lengths:
-        return tokens, tokens
+        return tokens[:max_source_length], tokens[:max_target_length]
     
-    # Select random positions for noise spans
-    num_nonnoise_tokens = num_tokens - sum(noise_span_lengths)
-    start_positions = sorted(np.random.choice(num_nonnoise_tokens, len(noise_span_lengths), replace=False))
+    # Select random positions for noise spans with bounds checking
+    max_start = max(1, num_tokens - max(noise_span_lengths))
+    if max_start <= 0:
+        return tokens[:max_source_length], tokens[:max_target_length]
+    
+    start_positions = sorted(np.random.choice(max_start, min(len(noise_span_lengths), max_start), replace=False))
     
     # Create input and target sequences
     input_tokens = []
     target_tokens = []
-    sentinel_id = tokenizer.additional_special_tokens_ids[10]  # <extra_id_0>
+    
+    # Use safe sentinel token access
+    if hasattr(tokenizer, 'additional_special_tokens_ids') and len(tokenizer.additional_special_tokens_ids) > 10:
+        base_sentinel = tokenizer.additional_special_tokens_ids[0]
+    else:
+        base_sentinel = tokenizer.eos_token_id + 1  # Fallback
     
     prev_end = 0
-    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
+    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths[:len(start_positions)])):
+        if start >= len(tokens) or start + length > len(tokens):
+            continue
+            
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input
-        input_tokens.append(sentinel_id + i)
+        # Add sentinel token to input (ensure within vocab bounds)
+        sentinel_token = min(base_sentinel + i, len(tokenizer) - 1)
+        input_tokens.append(sentinel_token)
         
         # Add sentinel token to target
-        target_tokens.append(sentinel_id + i)
+        target_tokens.append(sentinel_token)
         # Add noise span to target
         target_tokens.extend(tokens[start:start + length])
         
@@ -227,7 +256,10 @@ def get_batch(split):
         input_tokens = input_tokens[:max_source_length]
         target_tokens = target_tokens[:max_target_length]
         
-        # Pad sequences
+        # Ensure tokens are valid and pad sequences
+        input_tokens = [min(max(t, 0), len(tokenizer)-1) for t in input_tokens]
+        target_tokens = [min(max(t, 0), len(tokenizer)-1) for t in target_tokens]
+        
         input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
         target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
         
@@ -243,17 +275,25 @@ def get_batch(split):
     decoder_input_ids = torch.tensor(batch_decoder_input_ids, dtype=torch.long)
     labels = torch.tensor(batch_labels, dtype=torch.long)
     
+    # Create attention masks
+    attention_mask = (input_ids != tokenizer.pad_token_id).long()
+    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).long()
+    
     # Move to device
     if device_type == 'cuda':
         input_ids = input_ids.pin_memory().to(device, non_blocking=True)
         decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
         labels = labels.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
+        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
     else:
         input_ids = input_ids.to(device)
         decoder_input_ids = decoder_input_ids.to(device)
         labels = labels.to(device)
+        attention_mask = attention_mask.to(device)
+        decoder_attention_mask = decoder_attention_mask.to(device)
     
-    return input_ids, decoder_input_ids, labels
+    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
 
 # Initialize tracking
 iter_num = 0
@@ -270,12 +310,16 @@ model_args = dict(
     rank=rank, 
     q_rank=q_rank, 
     using_groupnorm=using_groupnorm,
-    vocab_size=tokenizer.vocab_size,
+    vocab_size=len(tokenizer),  # Use actual tokenizer size after adding special tokens
     dropout=dropout,
     pad_token_id=tokenizer.pad_token_id,
     eos_token_id=tokenizer.eos_token_id,
     decoder_start_token_id=tokenizer.pad_token_id
 )
+
+print(f"Tokenizer vocab size: {len(tokenizer)}")
+print(f"Pad token ID: {tokenizer.pad_token_id}")
+print(f"EOS token ID: {tokenizer.eos_token_id}")
 
 if init_from == 'scratch':
     print("Initializing ViLegalJERE model from scratch")
@@ -286,22 +330,28 @@ elif init_from == 'resume':
     config_obj = ViLegalConfig.from_json_file(os.path.join(resume_dir, 'config.json'))
     model = ViLegalJERE.from_pretrained(resume_dir, config=config_obj)
 
+# Resize model embeddings to match tokenizer
+if hasattr(model, 'resize_token_embeddings'):
+    model.resize_token_embeddings(len(tokenizer))
+
 model.to(device)
 
 # Calculate parameters
 param_count = get_num_params(model, non_embedding=False)
 param_count_m = param_count / 1_000_000
 
-# Update output directory
+print(f"Model initialized with {param_count_m:.1f}M parameters")
+
+# Update output directory for Kaggle
 if init_from != 'resume':
-    wandb_run_name = f"ViLegal_{int(param_count_m)}m_Opt_{optimizer_name}_LR_{learning_rate}_T_{total_tokens_B:.2f}B_time_{current_date}_jobid_{job_id}"
-    out_dir = f"output/out_vilegal_{int(param_count_m)}m_Opt_{optimizer_name}_LR_{learning_rate}_T_{total_tokens_B:.2f}B_time_{current_date}_jobid_{job_id}"
+    wandb_run_name = f"ViLegal_{int(param_count_m)}m_T5small_Kaggle_{current_date}"
+    out_dir = f"/kaggle/working/vilegal_{int(param_count_m)}m_checkpoint"
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
 
 # Initialize scaler and optimizer
-scaler = torch.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
@@ -330,11 +380,13 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            input_ids, decoder_input_ids, labels = get_batch(split)
+            input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch(split)
             with ctx:
                 outputs = model(
                     input_ids=input_ids,
+                    attention_mask=attention_mask,
                     decoder_input_ids=decoder_input_ids,
+                    decoder_attention_mask=decoder_attention_mask,
                     labels=labels
                 )
                 loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
@@ -387,7 +439,7 @@ if wandb_log and master_process:
 
 # Training loop
 print(f"Starting training ViLegalJERE with {param_count_m:.1f}M parameters...")
-input_ids, decoder_input_ids, labels = get_batch('train')
+input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -437,14 +489,16 @@ while True:
         with ctx:
             outputs = model(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
                 labels=labels
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
             loss = loss / gradient_accumulation_steps
         
         # Get next batch
-        input_ids, decoder_input_ids, labels = get_batch('train')
+        input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
         scaler.scale(loss).backward()
 
     # Gradient clipping

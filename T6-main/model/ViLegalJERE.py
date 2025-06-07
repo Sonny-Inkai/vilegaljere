@@ -40,8 +40,8 @@ class Rotary(torch.nn.Module):
             self.seq_len_cached = seq_len
             t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
             freqs = torch.outer(t, self.inv_freq).to(x.device)
-            self.cos_cached = freqs.cos().bfloat16()
-            self.sin_cached = freqs.sin().bfloat16()
+            self.cos_cached = freqs.cos().type_as(x)
+            self.sin_cached = freqs.sin().type_as(x)
         return self.cos_cached[None, :, None, :], self.sin_cached[None, :, None, :]
 
 def apply_rotary_emb(x, cos, sin):
@@ -284,6 +284,27 @@ class ViLegalJERE(PreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+    
+    def resize_token_embeddings(self, new_num_tokens):
+        """Resize token embeddings to match new vocabulary size"""
+        old_embeddings = self.get_input_embeddings()
+        if old_embeddings.num_embeddings == new_num_tokens:
+            return
+        
+        new_embeddings = nn.Embedding(new_num_tokens, old_embeddings.embedding_dim)
+        new_embeddings.to(old_embeddings.weight.device, dtype=old_embeddings.weight.dtype)
+        
+        # Copy existing embeddings
+        num_tokens_to_copy = min(old_embeddings.num_embeddings, new_num_tokens)
+        new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
+        
+        # Initialize new tokens with small random values
+        if new_num_tokens > old_embeddings.num_embeddings:
+            with torch.no_grad():
+                new_embeddings.weight.data[old_embeddings.num_embeddings:, :].normal_(mean=0.0, std=0.02)
+        
+        self.set_input_embeddings(new_embeddings)
+        self.lm_head.weight = new_embeddings.weight  # Tie weights
 
     def forward(
         self,
