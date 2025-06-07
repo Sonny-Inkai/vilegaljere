@@ -134,100 +134,78 @@ ctx = nullcontext() if device_type == 'cpu' else torch.autocast(device_type=devi
 
 # Data loading for Vietnamese legal text
 def load_legal_data():
-    """Load and tokenize Vietnamese legal text data"""
     data_file = os.path.join(data_path, 'dataset.txt')
-    
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Dataset not found at {data_file}")
-    
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
-    
-    # Split into articles/sections properly  
     articles = text.split('Điều ')
-    articles = [f"Điều {art}" for art in articles[1:] if len(art.strip()) > 30]
-    
-    # Take only first 100 articles for testing
-    articles = articles[:100]
-    
-    # Tokenize articles with validation
-    tokenized_data = []
-    for article in articles:
-        tokens = tokenizer(article, 
-                         max_length=max_source_length + max_target_length,
-                         truncation=True,
-                         padding=False)['input_ids']
-        
-        # Validate token IDs are within vocabulary bounds
-        valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
-        
-        if len(valid_tokens) > 10:  # Only keep meaningful articles
-            tokenized_data.append(valid_tokens)
-    
+    articles = [f"Điều {art.strip()}" for art in articles[1:]][:10]
+    tokenized_data = [tokenizer.encode(art, truncation=True, max_length=block_size) for art in articles]
     return tokenized_data
 
-def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
-    """Create T5-style span corruption for pre-training"""
+def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     num_tokens = len(tokens)
-    if num_tokens < 5:
-        return tokens[:max_source_length], tokens[:max_target_length]
-    
-    num_noise_tokens = max(1, int(round(num_tokens * noise_density)))
-    
-    # Create noise spans
-    noise_span_lengths = np.random.poisson(mean_noise_span_length, size=num_noise_tokens)
-    noise_span_lengths = [max(1, min(length, num_tokens//2)) for length in noise_span_lengths]
-    
-    # Adjust if total noise exceeds reasonable limit
-    while sum(noise_span_lengths) > num_tokens * 0.5:
-        noise_span_lengths = noise_span_lengths[:-1]
-        if not noise_span_lengths:
-            break
-    
-    if not noise_span_lengths:
-        return tokens[:max_source_length], tokens[:max_target_length]
-    
-    # Select random positions for noise spans with bounds checking
-    max_start = max(1, num_tokens - max(noise_span_lengths))
-    if max_start <= 0:
-        return tokens[:max_source_length], tokens[:max_target_length]
-    
-    start_positions = sorted(np.random.choice(max_start, min(len(noise_span_lengths), max_start), replace=False))
-    
-    # Create input and target sequences
+    num_noise_tokens = int(round(num_tokens * noise_density))
+    if num_noise_tokens == 0:
+        return tokens, tokens + [tokenizer.eos_token_id]
+
+    # Chọn ngẫu nhiên các vị trí để bắt đầu che (mask)
+    noise_indices = sorted(np.random.choice(range(num_tokens), num_noise_tokens, replace=False))
+
     input_tokens = []
     target_tokens = []
     
-    # Use safe sentinel token access
-    if hasattr(tokenizer, 'additional_special_tokens_ids') and len(tokenizer.additional_special_tokens_ids) > 10:
-        base_sentinel = tokenizer.additional_special_tokens_ids[0]
-    else:
-        base_sentinel = tokenizer.eos_token_id + 1  # Fallback
-    
-    prev_end = 0
-    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths[:len(start_positions)])):
-        if start >= len(tokens) or start + length > len(tokens):
-            continue
+    # --- LOGIC ĐÃ SỬA ---
+    # 1. Lấy ID của <extra_id_0> một cách tường minh. Đây là ID cao nhất trong dải sentinel.
+    try:
+        extra_id_0_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+        if extra_id_0_id == tokenizer.unk_token_id:
+            raise ValueError
+    except (KeyError, ValueError):
+        # Fallback an toàn nếu tokenizer không có extra_id
+        print("CẢNH BÁO: Không tìm thấy <extra_id_0>. Dùng fallback.")
+        extra_id_0_id = len(tokenizer) - 1
+
+    prev_idx = -1
+    sentinel_idx = 0
+    for idx in noise_indices:
+        if idx > prev_idx:
+            # Nếu có khoảng trống giữa các vùng nhiễu, thêm sentinel token
+            if prev_idx != -1:
+                target_tokens.extend(tokens[prev_idx+1:idx])
             
-        # Add non-noise tokens to input
-        input_tokens.extend(tokens[prev_end:start])
-        # Add sentinel token to input (ensure within vocab bounds)
-        sentinel_token = min(base_sentinel + i, len(tokenizer) - 1)
-        input_tokens.append(sentinel_token)
+            # Thêm sentinel token vào target
+            # Dùng phép trừ để có ID đúng: 10099, 10098, 10097,...
+            target_sentinel_id = extra_id_0_id - sentinel_idx
+            target_tokens.append(target_sentinel_id)
+            sentinel_idx += 1
         
-        # Add sentinel token to target
-        target_tokens.append(sentinel_token)
-        # Add noise span to target
-        target_tokens.extend(tokens[start:start + length])
-        
-        prev_end = start + length
-    
-    # Add remaining tokens to input
-    input_tokens.extend(tokens[prev_end:])
-    # Add EOS to target
+        input_tokens.extend(tokens[prev_idx+1:idx])
+        prev_idx = idx
+
+    # Thêm các token còn lại sau vùng nhiễu cuối cùng
+    input_tokens.extend(tokens[prev_idx+1:])
+    target_tokens.extend(tokens[prev_idx+1:])
     target_tokens.append(tokenizer.eos_token_id)
-    
-    return input_tokens, target_tokens
+
+    # Thay thế các vùng nhiễu trong input bằng sentinel token
+    final_input = []
+    in_masked_span = False
+    sentinel_idx = 0
+    for i in range(num_tokens):
+        if i in noise_indices:
+            if not in_masked_span:
+                # Dùng phép trừ để có ID đúng: 10099, 10098, 10097,...
+                input_sentinel_id = extra_id_0_id - sentinel_idx
+                final_input.append(input_sentinel_id)
+                sentinel_idx += 1
+                in_masked_span = True
+        else:
+            final_input.append(tokens[i])
+            in_masked_span = False
+
+    return final_input, target_tokens
 
 # Load data
 print("Loading Vietnamese legal data...")
