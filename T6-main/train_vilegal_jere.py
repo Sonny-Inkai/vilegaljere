@@ -13,59 +13,59 @@ import json
 from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
-# default config values designed to train ViLegalJERE on Vietnamese legal text
+# Config optimized for T5-small (~60M params) on Kaggle T4x2 GPUs
 # I/O
-data_path = "data"
-out_dir = 'output/out_vilegal'
+data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
+out_dir = '/kaggle/working/out_vilegal_t5small'
 resume_dir = '.'
-eval_interval = 1000
-log_interval = 1
-eval_iters = 100
+eval_interval = 500  # More frequent eval for shorter training
+log_interval = 50   # More frequent logging
+eval_iters = 50     # Fewer eval iterations to save time
 eval_only = False
 always_save_checkpoint = True
 init_from = 'scratch' # 'scratch' or 'resume'
 # wandb logging
-wandb_log = False
-wandb_project = 'ViLegalJERE'
-wandb_run_name = 'vilegal_jere'
+wandb_log = False    # Enable for better tracking
+wandb_project = 'ViLegalJERE-T5Small'
+wandb_run_name = 'vilegal_t5small_kaggle'
 # data
 dataset = 'vietnamese_legal'
-gradient_accumulation_steps = 4
-batch_size = 8
-block_size = 512  # reduced for T5
+gradient_accumulation_steps = 16  # Larger to compensate smaller batch
+batch_size = 4      # Smaller for T4 memory constraints
+block_size = 512    # Keep same
 max_source_length = 256  # encoder max length
 max_target_length = 256  # decoder max length
-# model
-n_layer = 12
-n_head = 16
-head_dim = 64
+# model - T5-small architecture (~60M parameters)
+n_layer = 6         # T5-small has 6 layers each for encoder/decoder
+n_head = 8          # T5-small uses 8 attention heads
+head_dim = 64       # 512/8 = 64
 rank = 4
 q_rank = 8
-n_embd = 1024
-dropout = 0.0
+n_embd = 512        # T5-small hidden size
+dropout = 0.1       # Standard dropout for T5
 bias = False
 using_groupnorm = True
 # optimizer
 optimizer_name = 'adamw'
-learning_rate = 1e-4  # lower LR for T5
-max_iters = 100000
+learning_rate = 1e-4  # Good for T5-small
+max_iters = 50000     # Reduced for smaller model
 weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 1000
-lr_decay_iters = 100000
-min_lr = 1e-5
-# DDP settings
+warmup_iters = 2000   # Longer warmup for stability
+lr_decay_iters = 50000
+min_lr = 1e-6
+# DDP settings for Kaggle T4x2
 backend = 'nccl'
 schedule = 'cosine'
 model_type = 'ViLegalJERE'
 # system
 device = 'cuda'
-dtype = 'bfloat16'
-compile = True
+dtype = 'float16'   # Use float16 for better T4 performance
+compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
@@ -106,7 +106,7 @@ else:
     master_process = True
     seed_offset = 0
     world_size = 1
-    gradient_accumulation_steps *= 8
+    # Keep gradient_accumulation_steps as is for single GPU
 
 # Calculate total tokens
 tokens_per_iter = batch_size * (max_source_length + max_target_length) * gradient_accumulation_steps * world_size
@@ -133,10 +133,13 @@ def load_legal_data():
         text = f.read()
     
     # Split into articles/sections
-    articles = text.split('Điều ')    
+    articles = text.split('Điều ')
+    # Remove empty articles
+    articles = [art.strip() for art in articles if art.strip()]
+    
     # Tokenize articles
     tokenized_data = []
-    for article in text:
+    for article in articles:  # Fixed: iterate over articles, not text
         # For T5 pre-training, create input-output pairs
         # Input: masked article, Output: original article
         tokens = tokenizer(article, 
@@ -144,7 +147,8 @@ def load_legal_data():
                          truncation=True,
                          padding=False)['input_ids']
         
-        tokenized_data.append(tokens)
+        if len(tokens) > 10:  # Only keep articles with meaningful content
+            tokenized_data.append(tokens)
     
     return tokenized_data
 
