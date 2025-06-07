@@ -14,58 +14,58 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # default config values designed to train ViLegalJERE on Vietnamese legal text
-# I/O - optimized for Kaggle
-data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
-out_dir = '/kaggle/working/output'  # Kaggle working directory
+# I/O
+data_path = "data"
+out_dir = 'output/out_vilegal'
 resume_dir = '.'
-eval_interval = 500  # more frequent evaluation for shorter runs
-log_interval = 10  # more frequent logging
-eval_iters = 50  # reduced for faster evaluation
+eval_interval = 1000
+log_interval = 1
+eval_iters = 100
 eval_only = False
 always_save_checkpoint = True
 init_from = 'scratch' # 'scratch' or 'resume'
 # wandb logging
-wandb_log = False  # disable for Kaggle
+wandb_log = False
 wandb_project = 'ViLegalJERE'
 wandb_run_name = 'vilegal_jere'
 # data
 dataset = 'vietnamese_legal'
-gradient_accumulation_steps = 5  # increased for effective batch size
-batch_size = 24  # reduced for T4 GPU memory
-block_size = 256  # reduced for T4
-max_source_length = 128  # reduced for T4 memory
-max_target_length = 128  # reduced for T4 memory
-# model - T5-small equivalent config
-n_layer = 6  # reduced to match T5-small
-n_head = 8  # reduced to match T5-small
+gradient_accumulation_steps = 4
+batch_size = 8
+block_size = 512  # reduced for T5
+max_source_length = 256  # encoder max length
+max_target_length = 256  # decoder max length
+# model
+n_layer = 12
+n_head = 16
 head_dim = 64
-rank = 2  # reduced for smaller model
-q_rank = 4  # reduced for smaller model
-n_embd = 512  # reduced to match T5-small
-dropout = 0.1  # add some dropout for regularization
+rank = 4
+q_rank = 8
+n_embd = 1024
+dropout = 0.0
 bias = False
 using_groupnorm = True
 # optimizer
 optimizer_name = 'adamw'
-learning_rate = 3e-4  # increased slightly for smaller model
-max_iters = 50000  # reduced for Kaggle session limits
+learning_rate = 1e-4  # lower LR for T5
+max_iters = 100000
 weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 500  # reduced for shorter training
-lr_decay_iters = 50000  # match max_iters
-min_lr = 3e-5  # proportional to learning_rate
-# DDP settings - for Kaggle T4x2
+warmup_iters = 1000
+lr_decay_iters = 100000
+min_lr = 1e-5
+# DDP settings
 backend = 'nccl'
 schedule = 'cosine'
 model_type = 'ViLegalJERE'
-# system - optimized for Kaggle T4
+# system
 device = 'cuda'
-dtype = 'float16'  # use float16 for T4 efficiency
-compile = False  # disable for compatibility on Kaggle
+dtype = 'bfloat16'
+compile = True
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
@@ -78,49 +78,6 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
-
-# Debug tokenizer thoroughly
-print(f"Tokenizer base vocab_size: {tokenizer.vocab_size}")
-print(f"Additional special tokens count: {len(tokenizer.additional_special_tokens)}")
-
-# Check special token IDs
-print(f"pad_token_id: {tokenizer.pad_token_id}")
-print(f"eos_token_id: {tokenizer.eos_token_id}")
-print(f"unk_token_id: {tokenizer.unk_token_id}")
-
-# Check extra_id token IDs
-extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
-print(f"Extra ID tokens found: {len(extra_id_tokens)}")
-if extra_id_tokens:
-    sample_extra_ids = extra_id_tokens[:5]  # First 5
-    for token in sample_extra_ids:
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        print(f"  {token} -> {token_id}")
-
-# Find the actual maximum token ID used
-all_special_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in tokenizer.additional_special_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
-max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids) if all_special_token_ids else tokenizer.vocab_size - 1
-actual_vocab_size = max_token_id + 1
-
-print(f"Max token ID found: {max_token_id}")
-print(f"Calculated vocab_size needed: {actual_vocab_size}")
-
-# Get valid extra_id token range
-extra_id_tokens = [token for token in tokenizer.additional_special_tokens if token.startswith('<extra_id_')]
-extra_id_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in extra_id_tokens if tokenizer.convert_tokens_to_ids(token) != tokenizer.unk_token_id]
-if extra_id_token_ids:
-    min_extra_id = min(extra_id_token_ids)
-    max_extra_id = max(extra_id_token_ids)
-    print(f"Valid extra_id range: {min_extra_id} to {max_extra_id}")
-else:
-    min_extra_id = max_extra_id = None
-    print("No valid extra_id tokens found")
-
-# Verify with sample encoding
-test_text = "Điều 1. Phạm vi điều chỉnh"
-test_tokens = tokenizer.encode(test_text, add_special_tokens=True)
-print(f"Sample encoding: {test_tokens}")
-print(f"Max token in sample: {max(test_tokens) if test_tokens else 0}")
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -149,7 +106,7 @@ else:
     master_process = True
     seed_offset = 0
     world_size = 1
-    # Don't multiply gradient_accumulation_steps for single GPU
+    gradient_accumulation_steps *= 8
 
 # Calculate total tokens
 tokens_per_iter = batch_size * (max_source_length + max_target_length) * gradient_accumulation_steps * world_size
@@ -175,7 +132,9 @@ def load_legal_data():
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Tokenize articles with reduced max length
+    # Split into articles/sections
+    articles = text.split('Điều ')    
+    # Tokenize articles
     tokenized_data = []
     for article in text:
         # For T5 pre-training, create input-output pairs
@@ -185,7 +144,6 @@ def load_legal_data():
                          truncation=True,
                          padding=False)['input_ids']
         
-          # Reduced filter for shorter sequences
         tokenized_data.append(tokens)
     
     return tokenized_data
@@ -208,39 +166,22 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     
     # Select random positions for noise spans
     num_nonnoise_tokens = num_tokens - sum(noise_span_lengths)
-    if num_nonnoise_tokens <= 0:
-        return tokens, tokens
-        
     start_positions = sorted(np.random.choice(num_nonnoise_tokens, len(noise_span_lengths), replace=False))
     
     # Create input and target sequences
     input_tokens = []
     target_tokens = []
-    
-    # Use valid extra_id tokens or fallback to special tokens
-    if max_extra_id is not None:
-        # Use actual extra_id tokens from tokenizer
-        available_sentinels = list(range(min_extra_id, max_extra_id + 1))
-    else:
-        # Fallback: use a range of special tokens that we know exist
-        # Use tokens near the end of vocab but before actual_vocab_size
-        fallback_start = actual_vocab_size - 200
-        available_sentinels = list(range(fallback_start, actual_vocab_size - 1))
-    
-    # Limit sentinels to what we actually need
-    max_sentinels_needed = min(len(noise_span_lengths), len(available_sentinels))
-    sentinels = available_sentinels[:max_sentinels_needed]
+    sentinel_id = tokenizer.additional_special_tokens_ids[10]  # <extra_id_0>
     
     prev_end = 0
-    for i, (start, length) in enumerate(zip(start_positions[:max_sentinels_needed], noise_span_lengths[:max_sentinels_needed])):
+    for i, (start, length) in enumerate(zip(start_positions, noise_span_lengths)):
         # Add non-noise tokens to input
         input_tokens.extend(tokens[prev_end:start])
         # Add sentinel token to input
-        sentinel_token = sentinels[i]
-        input_tokens.append(sentinel_token)
+        input_tokens.append(sentinel_id + i)
         
         # Add sentinel token to target
-        target_tokens.append(sentinel_token)
+        target_tokens.append(sentinel_id + i)
         # Add noise span to target
         target_tokens.extend(tokens[start:start + length])
         
@@ -249,21 +190,7 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
     # Add remaining tokens to input
     input_tokens.extend(tokens[prev_end:])
     # Add EOS to target
-    if tokenizer.eos_token_id is not None:
-        target_tokens.append(tokenizer.eos_token_id)
-    
-    # Strict safety check: ensure all tokens are within vocab range
-    max_allowed_id = actual_vocab_size - 1
-    
-    # Filter out any invalid tokens completely
-    input_tokens = [token for token in input_tokens if 0 <= token <= max_allowed_id]
-    target_tokens = [token for token in target_tokens if 0 <= token <= max_allowed_id]
-    
-    # Ensure we have valid sequences
-    if not input_tokens:
-        input_tokens = tokens[:min(len(tokens), max_source_length)]
-    if not target_tokens:
-        target_tokens = tokens[:min(len(tokens), max_target_length)]
+    target_tokens.append(tokenizer.eos_token_id)
     
     return input_tokens, target_tokens
 
@@ -296,18 +223,12 @@ def get_batch(split):
         input_tokens = input_tokens[:max_source_length]
         target_tokens = target_tokens[:max_target_length]
         
-        # Final safety check before padding
-        max_allowed_id = actual_vocab_size - 1
-        input_tokens = [min(max(token, 0), max_allowed_id) for token in input_tokens]
-        target_tokens = [min(max(token, 0), max_allowed_id) for token in target_tokens]
-        
-        # Pad sequences with safe pad token
-        pad_token = min(tokenizer.pad_token_id, max_allowed_id) if tokenizer.pad_token_id is not None else 0
-        input_tokens += [pad_token] * (max_source_length - len(input_tokens))
-        target_tokens += [pad_token] * (max_target_length - len(target_tokens))
+        # Pad sequences
+        input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+        target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
         
         # Decoder input (shift right)
-        decoder_input = [pad_token] + target_tokens[:-1]
+        decoder_input = [tokenizer.pad_token_id] + target_tokens[:-1]
         
         batch_input_ids.append(input_tokens)
         batch_decoder_input_ids.append(decoder_input)
@@ -345,11 +266,11 @@ model_args = dict(
     rank=rank, 
     q_rank=q_rank, 
     using_groupnorm=using_groupnorm,
-    vocab_size=actual_vocab_size,
+    vocab_size=tokenizer.vocab_size,
     dropout=dropout,
-    pad_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0,
-    eos_token_id=min(tokenizer.eos_token_id, actual_vocab_size - 1) if tokenizer.eos_token_id is not None else 1,
-    decoder_start_token_id=min(tokenizer.pad_token_id, actual_vocab_size - 1) if tokenizer.pad_token_id is not None else 0
+    pad_token_id=tokenizer.pad_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    decoder_start_token_id=tokenizer.pad_token_id
 )
 
 if init_from == 'scratch':
@@ -367,12 +288,10 @@ model.to(device)
 param_count = get_num_params(model, non_embedding=False)
 param_count_m = param_count / 1_000_000
 
-print(f"Model initialized with {param_count_m:.1f}M parameters")
-
-# Update output directory for Kaggle
+# Update output directory
 if init_from != 'resume':
-    wandb_run_name = f"ViLegal_{int(param_count_m)}m_T5small_Kaggle_{current_date}"
-    out_dir = f"/kaggle/working/vilegal_{int(param_count_m)}m_checkpoint"
+    wandb_run_name = f"ViLegal_{int(param_count_m)}m_Opt_{optimizer_name}_LR_{learning_rate}_T_{total_tokens_B:.2f}B_time_{current_date}_jobid_{job_id}"
+    out_dir = f"output/out_vilegal_{int(param_count_m)}m_Opt_{optimizer_name}_LR_{learning_rate}_T_{total_tokens_B:.2f}B_time_{current_date}_jobid_{job_id}"
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
