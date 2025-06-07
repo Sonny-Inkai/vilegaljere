@@ -2,7 +2,7 @@ from transformers import AutoTokenizer
 
 # Tải tokenizer từ Hugging Face Hub
 # Thư viện sẽ tự động đọc tất cả các file cấu hình liên quan
-tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+tokenizer = AutoTokenizer.from_pretrained('google-t5/t5-small')
 
 # Phương thức len() trên đối tượng tokenizer sẽ trả về tổng số token
 # bao gồm cả từ điển gốc và các token đặc biệt đã được thêm vào.
