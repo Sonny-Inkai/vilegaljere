@@ -184,7 +184,10 @@ def load_legal_data():
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
-            
+        
+          # Reduced filter for shorter sequences
+        tokenized_data.append(tokens)
+    
     return tokenized_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3):
