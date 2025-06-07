@@ -48,7 +48,7 @@ using_groupnorm = True
 # optimizer
 optimizer_name = 'adamw'
 learning_rate = 1e-4  # Good for T5-small
-max_iters = 1     # Reduced for smaller model
+max_iters = 10     # Reduced for smaller model
 weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.999
@@ -145,67 +145,52 @@ def load_legal_data():
     return tokenized_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
+    """
+    Tạo dữ liệu theo kiểu span corruption của T5 với LOGIC ĐÚNG.
+    """
     num_tokens = len(tokens)
     num_noise_tokens = int(round(num_tokens * noise_density))
     if num_noise_tokens == 0:
-        return tokens, tokens + [tokenizer.eos_token_id]
+        return tokens, tokens
 
-    # Chọn ngẫu nhiên các vị trí để bắt đầu che (mask)
-    noise_indices = sorted(np.random.choice(range(num_tokens), num_noise_tokens, replace=False))
-
-    input_tokens = []
-    target_tokens = []
+    # Chọn ngẫu nhiên các vị trí để bắt đầu che
+    noise_indices = np.random.choice(range(num_tokens), num_noise_tokens, replace=False)
+    noise_mask = np.zeros(num_tokens, dtype=bool)
+    noise_mask[noise_indices] = True
     
-    # --- LOGIC ĐÃ SỬA ---
-    # 1. Lấy ID của <extra_id_0> một cách tường minh. Đây là ID cao nhất trong dải sentinel.
+    # Lấy ID của sentinel token đầu tiên (<extra_id_0>) một cách an toàn
     try:
-        extra_id_0_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-        if extra_id_0_id == tokenizer.unk_token_id:
-            raise ValueError
+        sentinel_start_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+        if sentinel_start_id == tokenizer.unk_token_id: raise ValueError
     except (KeyError, ValueError):
-        # Fallback an toàn nếu tokenizer không có extra_id
-        print("CẢNH BÁO: Không tìm thấy <extra_id_0>. Dùng fallback.")
-        extra_id_0_id = len(tokenizer) - 1
-
-    prev_idx = -1
+        sentinel_start_id = len(tokenizer) - 1 # Fallback an toàn
+    
+    input_ids = []
+    labels = []
+    
+    in_noise_span = False
     sentinel_idx = 0
-    for idx in noise_indices:
-        if idx > prev_idx:
-            # Nếu có khoảng trống giữa các vùng nhiễu, thêm sentinel token
-            if prev_idx != -1:
-                target_tokens.extend(tokens[prev_idx+1:idx])
-            
-            # Thêm sentinel token vào target
-            # Dùng phép trừ để có ID đúng: 10099, 10098, 10097,...
-            target_sentinel_id = extra_id_0_id - sentinel_idx
-            target_tokens.append(target_sentinel_id)
-            sentinel_idx += 1
-        
-        input_tokens.extend(tokens[prev_idx+1:idx])
-        prev_idx = idx
-
-    # Thêm các token còn lại sau vùng nhiễu cuối cùng
-    input_tokens.extend(tokens[prev_idx+1:])
-    target_tokens.extend(tokens[prev_idx+1:])
-    target_tokens.append(tokenizer.eos_token_id)
-
-    # Thay thế các vùng nhiễu trong input bằng sentinel token
-    final_input = []
-    in_masked_span = False
-    sentinel_idx = 0
+    
     for i in range(num_tokens):
-        if i in noise_indices:
-            if not in_masked_span:
-                # Dùng phép trừ để có ID đúng: 10099, 10098, 10097,...
-                input_sentinel_id = extra_id_0_id - sentinel_idx
-                final_input.append(input_sentinel_id)
+        if noise_mask[i]:
+            if not in_noise_span:
+                # Bắt đầu một vùng nhiễu mới
+                # DÙNG PHÉP TRỪ để có ID sentinel đúng (10099, 10098, ...)
+                sentinel_id = sentinel_start_id - sentinel_idx
+                input_ids.append(sentinel_id)
+                labels.append(sentinel_id)
                 sentinel_idx += 1
-                in_masked_span = True
+            in_noise_span = True
+            labels.append(tokens[i])
         else:
-            final_input.append(tokens[i])
-            in_masked_span = False
-
-    return final_input, target_tokens
+            if in_noise_span:
+                # Kết thúc vùng nhiễu trước đó
+                in_noise_span = False
+            input_ids.append(tokens[i])
+    
+    labels.append(tokenizer.eos_token_id)
+    
+    return input_ids, labels
 
 # Load data
 print("Loading Vietnamese legal data...")
@@ -218,62 +203,54 @@ train_data = tokenized_data[:split_idx]
 val_data = tokenized_data[split_idx:]
 
 def get_batch(split):
-    """Get batch for T5 training"""
+    """
+    Lấy batch dữ liệu và tạo attention mask ĐÚNG CÁCH.
+    """
     data = train_data if split == 'train' else val_data
-    
+    if not data:
+        raise ValueError(f"Data split '{split}' is empty. Check data loading.")
+
     batch_input_ids = []
-    batch_decoder_input_ids = []
     batch_labels = []
     
     for _ in range(batch_size):
-        # Random article
         article_tokens = data[np.random.randint(len(data))]
-        
-        # Create T5 span corruption
         input_tokens, target_tokens = create_t5_spans(article_tokens)
         
-        # Truncate to max lengths
-        input_tokens = input_tokens[:max_source_length]
-        target_tokens = target_tokens[:max_target_length]
+        # Cắt bớt và đệm
+        input_padded = input_tokens[:max_source_length] + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+        labels_padded = target_tokens[:max_target_length] + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
         
-        # Ensure tokens are valid and pad sequences
-        input_tokens = [min(max(t, 0), len(tokenizer)-1) for t in input_tokens]
-        target_tokens = [min(max(t, 0), len(tokenizer)-1) for t in target_tokens]
-        
-        input_tokens += [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
-        target_tokens += [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
-        
-        # Decoder input (shift right)
-        decoder_input = [tokenizer.pad_token_id] + target_tokens[:-1]
-        
-        batch_input_ids.append(input_tokens)
-        batch_decoder_input_ids.append(decoder_input)
-        batch_labels.append(target_tokens)
+        batch_input_ids.append(input_padded)
+        batch_labels.append(labels_padded)
     
-    # Convert to tensors
+    # Chuyển thành tensor
     input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
-    decoder_input_ids = torch.tensor(batch_decoder_input_ids, dtype=torch.long)
     labels = torch.tensor(batch_labels, dtype=torch.long)
     
-    # Create attention masks
+    # Tạo attention mask
     attention_mask = (input_ids != tokenizer.pad_token_id).float()
-    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).float()
     
-    # Move to device
+    # T5 tự tạo decoder_input_ids từ labels, nên chúng ta không cần tạo decoder_attention_mask thủ công.
+    # Hoặc nếu mô hình cần, ta có thể tạo nó. Để an toàn, chúng ta sẽ tạo nó.
+    # LƯU Ý: labels cũng chính là đầu vào cho decoder_input_ids
+    temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
+    decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+
     if device_type == 'cuda':
-        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
-        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
-        labels = labels.pin_memory().to(device, non_blocking=True)
-        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+        input_ids, labels, attention_mask, decoder_attention_mask = (
+            input_ids.pin_memory().to(device, non_blocking=True),
+            labels.pin_memory().to(device, non_blocking=True),
+            attention_mask.pin_memory().to(device, non_blocking=True),
+            decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+        )
     else:
-        input_ids = input_ids.to(device)
-        decoder_input_ids = decoder_input_ids.to(device)
-        labels = labels.to(device)
-        attention_mask = attention_mask.to(device)
-        decoder_attention_mask = decoder_attention_mask.to(device)
+        input_ids, labels, attention_mask, decoder_attention_mask = (
+            input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device)
+        )
     
-    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
+    # Trả về labels cho cả decoder_input_ids và labels, cùng với attention masks
+    return input_ids, labels, labels, attention_mask, decoder_attention_mask
 
 # Initialize tracking
 iter_num = 0
