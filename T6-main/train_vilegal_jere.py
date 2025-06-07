@@ -18,9 +18,9 @@ from transformers import AutoTokenizer
 data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
 out_dir = '/kaggle/working/out_vilegal_t5small'
 resume_dir = '.'
-eval_interval = 500  # More frequent eval for shorter training
-log_interval = 50   # More frequent logging
-eval_iters = 50     # Fewer eval iterations to save time
+eval_interval = 1  # More frequent eval for shorter training
+log_interval = 1   # More frequent logging
+eval_iters = 1     # Fewer eval iterations to save time
 eval_only = False
 always_save_checkpoint = True
 init_from = 'scratch' # 'scratch' or 'resume'
@@ -30,8 +30,8 @@ wandb_project = 'ViLegalJERE-T5Small'
 wandb_run_name = 'vilegal_t5small_kaggle'
 # data
 dataset = 'vietnamese_legal'
-gradient_accumulation_steps = 8   # Reduced to avoid memory issues
-batch_size = 2      # Even smaller for T4 memory constraints
+gradient_accumulation_steps = 1   # Reduced to avoid memory issues
+batch_size = 1      # Even smaller for T4 memory constraints
 block_size = 512    # Keep same
 max_source_length = 256  # encoder max length
 max_target_length = 256  # decoder max length
@@ -48,7 +48,7 @@ using_groupnorm = True
 # optimizer
 optimizer_name = 'adamw'
 learning_rate = 1e-4  # Good for T5-small
-max_iters = 50000     # Reduced for smaller model
+max_iters = 1     # Reduced for smaller model
 weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.999
