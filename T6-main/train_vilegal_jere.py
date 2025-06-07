@@ -25,7 +25,7 @@ eval_only = False
 always_save_checkpoint = True
 init_from = 'scratch' # 'scratch' or 'resume'
 # wandb logging
-wandb_log = False    # Enable for better tracking
+wandb_log = True    # Enable for better tracking
 wandb_project = 'ViLegalJERE-T5Small'
 wandb_run_name = 'vilegal_t5small_kaggle'
 # data
