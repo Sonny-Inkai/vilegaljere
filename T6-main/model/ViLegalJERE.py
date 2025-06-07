@@ -153,11 +153,23 @@ class ViLegalSelfAttention(nn.Module):
 
         is_causal = not self.is_cross_attention
         
+        # Prepare attention mask for scaled_dot_product_attention
+        attn_mask = None
+        if attention_mask is not None:
+            # Convert to appropriate shape and dtype
+            if attention_mask.dim() == 2:
+                # Expand for all heads: [B, 1, 1, seq_len]
+                attn_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+            # Convert to bool (True for valid tokens, False for masked)
+            attn_mask = (attn_mask > 0.5).bool()
+            # For scaled_dot_product_attention, we need False for positions to mask
+            attn_mask = ~attn_mask
+        
         y = F.scaled_dot_product_attention(
             q.transpose(1, 2),
             k.transpose(1, 2),
             v.transpose(1, 2),
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             is_causal=is_causal
         )
         

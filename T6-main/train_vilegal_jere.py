@@ -142,16 +142,24 @@ def load_legal_data():
     
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
-
+    
+    # Split into articles/sections
+    articles = text.split('Điều ')
+    articles = [f"Điều {art}" for art in articles[1:] if len(art.strip()) > 30]
+    
     # Tokenize articles with validation
     tokenized_data = []
-    for article in text:
+    for article in articles:
         tokens = tokenizer(article, 
                          max_length=max_source_length + max_target_length,
                          truncation=True,
                          padding=False)['input_ids']
         
-        tokenized_data.append(tokens)
+        # Validate token IDs are within vocabulary bounds
+        valid_tokens = [t for t in tokens if 0 <= t < len(tokenizer)]
+        
+        if len(valid_tokens) > 10:  # Only keep articles with meaningful content
+            tokenized_data.append(valid_tokens)
     
     return tokenized_data
 
@@ -267,8 +275,8 @@ def get_batch(split):
     labels = torch.tensor(batch_labels, dtype=torch.long)
     
     # Create attention masks
-    attention_mask = (input_ids != tokenizer.pad_token_id).long()
-    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).long()
+    attention_mask = (input_ids != tokenizer.pad_token_id).float()
+    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).float()
     
     # Move to device
     if device_type == 'cuda':
