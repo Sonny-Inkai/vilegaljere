@@ -477,7 +477,7 @@ while True:
             best_val_loss = losses['val']
             if iter_num > 0:
                 print(f"Saving checkpoint to {out_dir}")
-                raw_model.save_pretrained(out_dir)
+                raw_model.save_pretrained(out_dir, safe_serialization=False)
                 optimizer_state = {
                     'optimizer': optimizer.state_dict(),
                     'iter_num': iter_num,

@@ -16,3 +16,13 @@ max_token_id = max([tokenizer.vocab_size - 1] + all_special_token_ids)
 actual_vocab_size = max_token_id + 1
 
 print(actual_vocab_size)
+
+a = tokenizer.additional_special_tokens_ids
+print(a)
+print('--------------------------------')
+for i in range(len(a)):
+    print(tokenizer.decode(a[i]))
+
+print('--------------------------------')
+print(a[0])
+print(tokenizer.decode(32099))
