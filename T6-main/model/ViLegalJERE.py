@@ -350,9 +350,19 @@ class ViLegalJERE(PreTrainedModel):
         loss = None
         
         if labels is not None:
-            # Use pad_token_id as ignore_index instead of -100
-            loss_fct = nn.CrossEntropyLoss(ignore_index=self.config.pad_token_id)
-            loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+            # Handle both -100 (for fine-tuning) and pad_token_id (for pre-training)
+            # Create a mask for valid tokens (not -100 and not pad_token_id)
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # Flatten for loss computation
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            
+            # Replace pad_token_id with -100 for consistent ignore behavior
+            shift_labels_masked = shift_labels.clone()
+            shift_labels_masked[shift_labels_masked == self.config.pad_token_id] = -100
+            
+            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels_masked.view(-1))
 
         if not return_dict:
             output = (logits,) + decoder_outputs[1:]

@@ -13,27 +13,60 @@ import json
 from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
-# Config optimized for T5-small (~60M params) on Kaggle T4x2 GPUs
-# I/O
-data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
-out_dir = '/kaggle/working/out_vilegal_t5small'
-resume_dir = '.'
-eval_interval = 1  # More frequent eval for shorter training
-log_interval = 1   # More frequent logging
-eval_iters = 1     # Fewer eval iterations to save time
+# -- CÔNG TẮC CHÍNH --
+finetune = False # Đổi thành True khi cháu muốn chạy fine-tuning
+# -----------------------------------------------------------------------------
+
+# --- Cấu hình chung ---
 eval_only = False
 always_save_checkpoint = True
-init_from = 'scratch' # 'scratch' or 'resume'
+
+# Trong Kaggle notebook, thêm vào cell đầu tiên:
+import os
+os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
+
+# --- Cấu hình riêng cho từng giai đoạn ---
+if finetune:
+    # --- CẤU HÌNH CHO FINE-TUNING ---
+    init_from = 'resume' # Bắt buộc phải resume từ model đã pre-trained
+    data_path = "/kaggle/input/your-finetune-dataset" # Nơi chứa file finetune.txt
+    finetune_file_name = "finetune.txt"
+    out_dir = '/kaggle/working/out_vilegal_t5small' # Thư mục chứa checkpoint pre-trained
+    
+    # Siêu tham số cho fine-tuning
+    learning_rate = 3e-5 # Learning rate nhỏ hơn nhiều
+    max_iters = 10    # Số vòng lặp ít hơn
+    batch_size = 4       # Batch size có thể nhỏ hơn
+    gradient_accumulation_steps = 2
+    weight_decay = 0.01
+    eval_interval = 100
+    log_interval = 10
+    eval_iters = 10
+    
+else:
+    # --- CẤU HÌNH CHO PRE-TRAINING ---
+    init_from = 'scratch' # 'scratch' or 'resume'
+    data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
+    out_dir = '/kaggle/working/out_vilegal_t5small'
+    
+    # Siêu tham số cho pre-training
+    learning_rate = 1e-4  # Good for T5-small
+    max_iters = 10     # Reduced for smaller model
+    batch_size = 1      # Even smaller for T4 memory constraints
+    gradient_accumulation_steps = 1   # Reduced to avoid memory issues
+    weight_decay = 1e-2
+    eval_interval = 1  # More frequent eval for shorter training
+    log_interval = 1   # More frequent logging
+    eval_iters = 1     # Fewer eval iterations to save time
+    
 # wandb logging
 wandb_log = True    # Enable for better tracking
 wandb_project = 'ViLegalJERE-T5Small'
 wandb_run_name = 'vilegal_t5small_kaggle'
 # data
 dataset = 'vietnamese_legal'
-gradient_accumulation_steps = 1   # Reduced to avoid memory issues
-batch_size = 1      # Even smaller for T4 memory constraints
 block_size = 512    # Keep same
-max_source_length = 256  # encoder max length
+max_source_length = 512  # encoder max length
 max_target_length = 256  # decoder max length
 # model - T5-small architecture (~60M parameters)
 n_layer = 6         # T5-small has 6 layers each for encoder/decoder
@@ -47,9 +80,6 @@ bias = False
 using_groupnorm = True
 # optimizer
 optimizer_name = 'adamw'
-learning_rate = 1e-4  # Good for T5-small
-max_iters = 10     # Reduced for smaller model
-weight_decay = 1e-2
 beta1 = 0.9
 beta2 = 0.999
 grad_clip = 1.0
@@ -134,15 +164,38 @@ ctx = nullcontext() if device_type == 'cpu' else torch.autocast(device_type=devi
 
 # Data loading for Vietnamese legal text
 def load_legal_data():
+    """Tải dữ liệu cho pre-training"""
     data_file = os.path.join(data_path, 'dataset.txt')
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Dataset not found at {data_file}")
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
     articles = text.split('Điều ')
-    articles = [f"Điều {art.strip()}" for art in articles[1:]][:10]
+    articles = [f"Điều {art.strip()}" for art in articles[1:] if len(art.strip()) > 50][:10]
     tokenized_data = [tokenizer.encode(art, truncation=True, max_length=block_size) for art in articles]
     return tokenized_data
+
+def load_finetune_data():
+    """Tải và xử lý dữ liệu từ file finetune.txt (JSON) cho fine-tuning"""
+    data_file = os.path.join(data_path, finetune_file_name)
+    if not os.path.exists(data_file):
+        raise FileNotFoundError(f"Finetune dataset not found at {data_file}")
+    
+    processed_data = []
+    with open(data_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    for key, value in data.items():
+        source_text = value.get("formatted_context_sent", "")
+        target_text = value.get("extracted_relations_text", "")
+        
+        # Chỉ lấy các cặp dữ liệu có cả input và output
+        if source_text and target_text:
+            processed_data.append((source_text, target_text))
+    
+    if master_process:
+        print(f"Loaded {len(processed_data)} fine-tuning pairs")
+    return processed_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     """
@@ -192,51 +245,87 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     
     return input_ids, labels
 
-# Load data
-print("Loading Vietnamese legal data...")
-tokenized_data = load_legal_data()
-print(f"Loaded {len(tokenized_data)} legal articles")
+# Load data based on mode
+if master_process: 
+    print(f"Running in '{'Fine-tuning' if finetune else 'Pre-training'}' mode.")
+
+if finetune:
+    print("Loading fine-tuning data...")
+    all_data = load_finetune_data()
+else:
+    print("Loading Vietnamese legal data for pre-training...")
+    all_data = load_legal_data()
+    print(f"Loaded {len(all_data)} legal articles")
 
 # Split train/val
-split_idx = int(0.95 * len(tokenized_data))
-train_data = tokenized_data[:split_idx]
-val_data = tokenized_data[split_idx:]
+split_idx = int(0.95 * len(all_data))
+train_data = all_data[:split_idx]
+val_data = all_data[split_idx:]
+print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
 def get_batch(split):
     """
-    Lấy batch dữ liệu và tạo attention mask ĐÚNG CÁCH.
+    HÀM GET_BATCH ĐA NĂNG - Hỗ trợ cả pre-training và fine-tuning
     """
     data = train_data if split == 'train' else val_data
     if not data:
         raise ValueError(f"Data split '{split}' is empty. Check data loading.")
 
-    batch_input_ids = []
-    batch_labels = []
-    
-    for _ in range(batch_size):
-        article_tokens = data[np.random.randint(len(data))]
-        input_tokens, target_tokens = create_t5_spans(article_tokens)
+    if finetune:
+        # --- LẤY BATCH CHO FINE-TUNING ---
+        ix = np.random.randint(len(data), size=(batch_size,))
+        batch_pairs = [data[i] for i in ix]
         
-        # Cắt bớt và đệm
-        input_padded = input_tokens[:max_source_length] + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
-        labels_padded = target_tokens[:max_target_length] + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
+        # Lấy các cặp (context, relations)
+        source_texts = [pair[0] for pair in batch_pairs]
+        target_texts = [pair[1] for pair in batch_pairs]
         
-        batch_input_ids.append(input_padded)
-        batch_labels.append(labels_padded)
-    
-    # Chuyển thành tensor
-    input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
-    labels = torch.tensor(batch_labels, dtype=torch.long)
-    
-    # Tạo attention mask
-    attention_mask = (input_ids != tokenizer.pad_token_id).float()
-    
-    # T5 tự tạo decoder_input_ids từ labels, nên chúng ta không cần tạo decoder_attention_mask thủ công.
-    # Hoặc nếu mô hình cần, ta có thể tạo nó. Để an toàn, chúng ta sẽ tạo nó.
-    # LƯU Ý: labels cũng chính là đầu vào cho decoder_input_ids
-    temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
-    decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        # Tokenize source và target
+        input_encodings = tokenizer(source_texts, padding=True, truncation=True, 
+                                  max_length=max_source_length, return_tensors="pt")
+        target_encodings = tokenizer(target_texts, padding=True, truncation=True, 
+                                   max_length=max_target_length, return_tensors="pt")
+        
+        input_ids = input_encodings.input_ids
+        attention_mask = input_encodings.attention_mask
+        labels = target_encodings.input_ids
+        
+        # Với T5, các token padding trong labels nên được thay bằng -100 để hàm loss bỏ qua
+        labels[labels == tokenizer.pad_token_id] = -100
+        
+        # Tạo decoder_attention_mask
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
+        temp_decoder_input_ids[temp_decoder_input_ids == -100] = tokenizer.pad_token_id
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        
+    else:
+        # --- LẤY BATCH CHO PRE-TRAINING (logic cũ) ---
+        batch_input_ids = []
+        batch_labels = []
+        
+        for _ in range(batch_size):
+            article_tokens = data[np.random.randint(len(data))]
+            input_tokens, target_tokens = create_t5_spans(article_tokens)
+            
+            # Cắt bớt và đệm
+            input_padded = input_tokens[:max_source_length] + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+            labels_padded = target_tokens[:max_target_length] + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
+            
+            batch_input_ids.append(input_padded)
+            batch_labels.append(labels_padded)
+        
+        # Chuyển thành tensor
+        input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
+        labels = torch.tensor(batch_labels, dtype=torch.long)
+        
+        # Tạo attention mask
+        attention_mask = (input_ids != tokenizer.pad_token_id).float()
+        
+        # Tạo decoder_attention_mask cho pre-training
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
 
+    # Chuyển lên GPU
     if device_type == 'cuda':
         input_ids, labels, attention_mask, decoder_attention_mask = (
             input_ids.pin_memory().to(device, non_blocking=True),
@@ -249,14 +338,10 @@ def get_batch(split):
             input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device)
         )
     
-    # Trả về labels cho cả decoder_input_ids và labels, cùng với attention masks
+    # Trả về dữ liệu theo format model cần
     return input_ids, labels, labels, attention_mask, decoder_attention_mask
 
-# Initialize tracking
-iter_num = 0
-best_val_loss = 1e9
-
-# Model initialization
+# Model initialization arguments
 model_args = dict(
     n_layer=n_layer, 
     n_head=n_head, 
@@ -278,18 +363,48 @@ print(f"Tokenizer vocab size: {len(tokenizer)}")
 print(f"Pad token ID: {tokenizer.pad_token_id}")
 print(f"EOS token ID: {tokenizer.eos_token_id}")
 
+# Initialize tracking variables
+iter_num = 0
+best_val_loss = 1e9
+
+# --- KHỐI KHỞI TẠO MODEL VÀ RESUME ĐÃ SỬA LẠI ---
 if init_from == 'scratch':
-    print("Initializing ViLegalJERE model from scratch")
+    if master_process:
+        print("Initializing a new model from scratch")
+    # Khởi tạo model từ đầu với các tham số đã định nghĩa
     config_obj = ViLegalConfig(**model_args)
     model = ViLegalJERE(config_obj)
-elif init_from == 'resume':
-    print(f"Resuming training from {resume_dir}")
-    config_obj = ViLegalConfig.from_json_file(os.path.join(resume_dir, 'config.json'))
-    model = ViLegalJERE.from_pretrained(resume_dir, config=config_obj)
 
-# Resize model embeddings to match tokenizer
-if hasattr(model, 'resize_token_embeddings'):
+elif init_from == 'resume':
+    if master_process:
+        print(f"Resuming training from {out_dir}")
+    
+    # Kiểm tra xem thư mục checkpoint có tồn tại không
+    if not os.path.exists(out_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
+
+    # Tải lại model từ checkpoint đã lưu. 
+    # from_pretrained sẽ tự động tải cả config và trọng số
+    model = ViLegalJERE.from_pretrained(out_dir)
+    
+    # Tải lại trạng thái của optimizer và các biến tiến trình
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
+        if master_process:
+            print(f"Resumed successfully from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
+    else:
+        # Nếu không tìm thấy file optimizer, bắt đầu từ đầu nhưng vẫn dùng model đã tải
+        print(f"Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
+        # iter_num và best_val_loss sẽ giữ giá trị mặc định là 0 và 1e9
+
+# Resize model embeddings để khớp với tokenizer (an toàn)
+if hasattr(model, 'resize_token_embeddings') and len(tokenizer) != model.config.vocab_size:
     model.resize_token_embeddings(len(tokenizer))
+    if master_process:
+        print(f"Resized model embeddings to size {len(tokenizer)}")
 
 model.to(device)
 
@@ -302,7 +417,7 @@ print(f"Model initialized with {param_count_m:.1f}M parameters")
 # Update output directory for Kaggle
 if init_from != 'resume':
     wandb_run_name = f"ViLegal_{int(param_count_m)}m_T5small_Kaggle_{current_date}"
-    out_dir = f"/kaggle/working/vilegal_{int(param_count_m)}m_checkpoint"
+    out_dir = f"/kaggle/working/out_vilegal_t5small"
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -313,11 +428,14 @@ scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
 
+# Tải lại trạng thái optimizer nếu resume và file tồn tại
 if init_from == 'resume':
-    optimizer_state = torch.load(os.path.join(resume_dir, 'optimizer.pt'), map_location=device)
-    optimizer.load_state_dict(optimizer_state['optimizer'])
-    iter_num = optimizer_state['iter_num']
-    best_val_loss = optimizer_state['best_val_loss']
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        if master_process:
+            print("Optimizer state loaded successfully")
 
 # Compile model
 if compile:
@@ -366,6 +484,19 @@ def get_lr(it, schedule='cosine'):
 # Logging setup
 if wandb_log and master_process:
     import wandb
+    
+    # Tự động đăng nhập wandb
+    try:
+        # Thử đăng nhập bằng API key từ environment hoặc file config
+        wandb.login()
+        print("✅ Đăng nhập wandb thành công!")
+    except Exception as e:
+        print(f"⚠️ Không thể đăng nhập wandb với API key: {e}")
+        print("🔄 Chuyển sang chế độ anonymous...")
+        # Fallback sang chế độ anonymous nếu không có API key
+        wandb.login(anonymous="allow")
+        print("✅ Sử dụng wandb ở chế độ anonymous!")
+    
     wandb_config = {
         'model_args': model_args,
         'training_args': {
@@ -395,10 +526,12 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=wandb_config)
 
 # Training loop
-print(f"Starting training ViLegalJERE with {param_count_m:.1f}M parameters...")
+mode_text = "Fine-tuning" if finetune else "Pre-training"
+print(f"Starting {mode_text} ViLegalJERE with {param_count_m:.1f}M parameters...")
 print(f"Training data size: {len(train_data)}, Val data size: {len(val_data)}")
 print(f"Batch size: {batch_size}, Gradient accumulation: {gradient_accumulation_steps}")
 print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
+print(f"Mode: {mode_text}, Learning rate: {learning_rate}, Max iters: {max_iters}")
 
 input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
 print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
