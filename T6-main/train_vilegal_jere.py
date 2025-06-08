@@ -45,7 +45,7 @@ if finetune:
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
-    init_from = 'scratch' # 'scratch' or 'resume'
+    init_from = 'resume' # 'scratch' or 'resume'
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
