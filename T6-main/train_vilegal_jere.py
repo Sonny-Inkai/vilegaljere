@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = False # Đổi thành True khi cháu muốn chạy fine-tuning
+finetune = True # Đổi thành True khi cháu muốn chạy fine-tuning
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
