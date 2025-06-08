@@ -109,17 +109,6 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Ensure tokenizer has required special tokens
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-if tokenizer.eos_token_id is None:
-    tokenizer.eos_token_id = len(tokenizer) - 1
-
-# Add extra_id tokens if not present
-if not hasattr(tokenizer, 'additional_special_tokens_ids') or len(tokenizer.additional_special_tokens_ids) < 100:
-    extra_tokens = [f"<extra_id_{i}>" for i in range(100)]
-    tokenizer.add_special_tokens({'additional_special_tokens': extra_tokens})
-
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
     n_params = sum(p.numel() for p in model.parameters())
@@ -399,11 +388,6 @@ elif init_from == 'resume':
         print(f"Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
         # iter_num và best_val_loss sẽ giữ giá trị mặc định là 0 và 1e9
 
-# Resize model embeddings để khớp với tokenizer (an toàn)
-if hasattr(model, 'resize_token_embeddings') and len(tokenizer) != model.config.vocab_size:
-    model.resize_token_embeddings(len(tokenizer))
-    if master_process:
-        print(f"Resized model embeddings to size {len(tokenizer)}")
 
 model.to(device)
 
