@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = False # Đổi thành True khi cháu muốn chạy fine-tuning
+finetune = True # Đổi thành True khi cháu muốn chạy fine-tuning
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -198,7 +198,7 @@ def load_finetune_data():
     
     if master_process:
         print(f"Loaded {len(processed_data)} fine-tuning pairs")
-    return processed_data
+    return processed_data[:10]
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     """
