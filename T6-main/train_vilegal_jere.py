@@ -36,7 +36,7 @@ if finetune:
     # Siêu tham số cho fine-tuning
     learning_rate = 3e-5 # Learning rate nhỏ hơn nhiều
     max_iters = 10    # Số vòng lặp ít hơn
-    batch_size = 4       # Batch size có thể nhỏ hơn
+    batch_size = 1       # Batch size có thể nhỏ hơn
     gradient_accumulation_steps = 2
     weight_decay = 0.01
     eval_interval = 1
@@ -51,7 +51,7 @@ else:
     
     # Siêu tham số cho pre-training
     learning_rate = 1e-4  # Good for T5-small
-    max_iters = 20     # Reduced for smaller model
+    max_iters = 2     # Very small for testing
     batch_size = 1      # Even smaller for T4 memory constraints
     gradient_accumulation_steps = 1   # Reduced to avoid memory issues
     weight_decay = 1e-2
@@ -93,9 +93,9 @@ backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
 schedule = 'cosine'
 model_type = 'ViLegalJERE'
 # system
-device = 'cuda'
-dtype = 'float16'   # Use float16 for better T4 performance
-compile = False     # Disable compile for Kaggle compatibility
+device = 'cuda'  
+dtype = 'float16'   # Use float32 for kaggle t4x2
+compile = True     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
@@ -388,6 +388,14 @@ elif init_from == 'resume':
         print(f"Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
         # iter_num và best_val_loss sẽ giữ giá trị mặc định là 0 và 1e9
 
+# Fix vocabulary size mismatch between model and tokenizer
+if model.config.vocab_size != len(tokenizer):
+    if master_process:
+        print(f"Vocab size mismatch: model={model.config.vocab_size}, tokenizer={len(tokenizer)}")
+        print("Resizing model embeddings to match tokenizer...")
+    model.resize_token_embeddings(len(tokenizer))
+    if master_process:
+        print(f"Model embeddings resized to {len(tokenizer)}")
 
 model.to(device)
 
