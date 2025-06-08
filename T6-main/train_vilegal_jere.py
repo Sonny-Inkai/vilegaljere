@@ -278,12 +278,9 @@ def get_batch(split):
         attention_mask = input_encodings.attention_mask
         labels = target_encodings.input_ids
         
-        # Với T5, các token padding trong labels nên được thay bằng -100 để hàm loss bỏ qua
-        labels[labels == tokenizer.pad_token_id] = -100
-        
         # Tạo decoder_attention_mask
+        # This mask is based on shifted labels to correctly mask padding in the decoder's self-attention.
         temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
-        temp_decoder_input_ids[temp_decoder_input_ids == -100] = tokenizer.pad_token_id
         decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
         
     else:
