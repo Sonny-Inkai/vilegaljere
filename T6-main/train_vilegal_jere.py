@@ -95,7 +95,7 @@ model_type = 'ViLegalJERE'
 # system
 device = 'cuda'  
 dtype = 'float16'   # Use float32 for kaggle t4x2
-compile = True     # Disable compile for Kaggle compatibility
+compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 

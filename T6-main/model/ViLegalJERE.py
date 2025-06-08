@@ -3,8 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 from transformers import PreTrainedModel, PretrainedConfig
+
+@dataclass
+class EncoderOutput:
+    last_hidden_state: torch.Tensor
+    hidden_states: Optional[Tuple[torch.Tensor]] = None
+
+@dataclass
+class DecoderOutput:
+    logits: torch.Tensor
+    hidden_states: Optional[Tuple[torch.Tensor]] = None
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
@@ -393,10 +403,10 @@ class ViLegalJERE(PreTrainedModel):
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (x,)
             
-        return type('EncoderOutput', (), {
-            'last_hidden_state': x,
-            'hidden_states': all_hidden_states,
-        })()
+        return EncoderOutput(
+            last_hidden_state=x,
+            hidden_states=all_hidden_states,
+        )
 
     def decode(
         self,
@@ -427,10 +437,10 @@ class ViLegalJERE(PreTrainedModel):
             
         logits = self.lm_head(x)
         
-        return type('DecoderOutput', (), {
-            'logits': logits,
-            'hidden_states': all_hidden_states,
-        })()
+        return DecoderOutput(
+            logits=logits,
+            hidden_states=all_hidden_states,
+        )
 
     def generate(
         self,
