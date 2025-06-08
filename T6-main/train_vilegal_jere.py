@@ -6,7 +6,6 @@ from contextlib import nullcontext
 import importlib
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from datetime import datetime
@@ -46,7 +45,7 @@ if finetune:
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
-    init_from = 'scratch' # 'scratch' or 'resume'
+    init_from = 'resume' # 'scratch' or 'resume'
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
@@ -110,20 +109,6 @@ from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
-# Ensure we have necessary special tokens
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-if not hasattr(tokenizer, 'extra_ids') or len([t for t in tokenizer.get_vocab() if t.startswith('<extra_id_')]) < 100:
-    # Add extra sentinel tokens if not present
-    new_tokens = [f'<extra_id_{i}>' for i in range(100)]
-    tokenizer.add_special_tokens({'additional_special_tokens': new_tokens})
-
-print(f"Tokenizer info:")
-print(f"  Vocab size: {len(tokenizer)}")
-print(f"  Pad token: {tokenizer.pad_token} (ID: {tokenizer.pad_token_id})")
-print(f"  EOS token: {tokenizer.eos_token} (ID: {tokenizer.eos_token_id})")
-print(f"  Extra tokens: {len([t for t in tokenizer.get_vocab() if t.startswith('<extra_id_')])}")
-
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
     n_params = sum(p.numel() for p in model.parameters())
@@ -176,7 +161,7 @@ def load_legal_data():
         text = f.read()
     articles = [art for art in text][:10]
     tokenized_data = [tokenizer.encode(art, truncation=True, max_length=block_size) for art in articles]
-    return tokenized_data
+    return tokenized_data[:10]
 
 def load_finetune_data():
     """Tải và xử lý dữ liệu từ file finetune.json (JSON) cho fine-tuning"""
@@ -202,65 +187,48 @@ def load_finetune_data():
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     """
-    Tạo T5-style span corruption với logic đúng như paper gốc
+    Tạo dữ liệu theo kiểu span corruption của T5 với LOGIC ĐÚNG.
     """
     num_tokens = len(tokens)
-    if num_tokens == 0:
-        return [tokenizer.pad_token_id], [tokenizer.eos_token_id]
-    
-    # Tính số tokens cần mask
     num_noise_tokens = int(round(num_tokens * noise_density))
     if num_noise_tokens == 0:
-        return tokens[:], tokens[:] + [tokenizer.eos_token_id]
+        return tokens, tokens
+
+    # Chọn ngẫu nhiên các vị trí để bắt đầu che
+    noise_indices = np.random.choice(range(num_tokens), num_noise_tokens, replace=False)
+    noise_mask = np.zeros(num_tokens, dtype=bool)
+    noise_mask[noise_indices] = True
     
-    # Tạo noise spans liên tiếp
-    num_spans = max(1, int(round(num_noise_tokens / mean_noise_span_length)))
-    
-    # Chọn positions để bắt đầu spans
-    start_positions = sorted(np.random.choice(num_tokens, min(num_spans, num_tokens), replace=False))
-    
-    # Lấy sentinel token IDs (extra_id_0, extra_id_1, ...)
+    # Lấy ID của sentinel token đầu tiên (<extra_id_0>) một cách an toàn
     try:
         sentinel_start_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-        if sentinel_start_id == tokenizer.unk_token_id:
-            sentinel_start_id = len(tokenizer) - 100  # Fallback
-    except:
-        sentinel_start_id = len(tokenizer) - 100
+        if sentinel_start_id == tokenizer.unk_token_id: raise ValueError
+    except (KeyError, ValueError):
+        sentinel_start_id = len(tokenizer) - 1 # Fallback an toàn
     
-    # Tạo mask cho noise spans
-    noise_mask = np.zeros(num_tokens, dtype=bool)
-    for i, start_pos in enumerate(start_positions):
-        span_length = min(int(np.random.exponential(mean_noise_span_length)) + 1, 
-                         num_tokens - start_pos)
-        noise_mask[start_pos:start_pos + span_length] = True
-        if np.sum(noise_mask) >= num_noise_tokens:
-            break
-    
-    # Tạo input (với sentinel tokens) và target (masked spans)
     input_ids = []
     labels = []
     
-    sentinel_id = 0
-    i = 0
+    in_noise_span = False
+    sentinel_idx = 0
     
-    while i < num_tokens:
+    for i in range(num_tokens):
         if noise_mask[i]:
-            # Bắt đầu masked span
-            current_sentinel = sentinel_start_id - sentinel_id
-            input_ids.append(current_sentinel)
-            labels.append(current_sentinel)
-            
-            # Add all masked tokens to labels
-            while i < num_tokens and noise_mask[i]:
-                labels.append(tokens[i])
-                i += 1
-            sentinel_id += 1
+            if not in_noise_span:
+                # Bắt đầu một vùng nhiễu mới
+                # DÙNG PHÉP TRỪ để có ID sentinel đúng (10099, 10098, ...)
+                sentinel_id = sentinel_start_id - sentinel_idx
+                input_ids.append(sentinel_id)
+                labels.append(sentinel_id)
+                sentinel_idx += 1
+            in_noise_span = True
+            labels.append(tokens[i])
         else:
-            # Keep original token
+            if in_noise_span:
+                # Kết thúc vùng nhiễu trước đó
+                in_noise_span = False
             input_ids.append(tokens[i])
-            i += 1
     
-    # Add EOS to labels
     labels.append(tokenizer.eos_token_id)
     
     return input_ids, labels
@@ -310,20 +278,16 @@ def get_batch(split):
         attention_mask = input_encodings.attention_mask
         labels = target_encodings.input_ids
         
-        # T5 decoder_input_ids: shift labels right và thêm decoder_start_token
-        decoder_input_ids = torch.cat([
-            torch.full((labels.shape[0], 1), tokenizer.pad_token_id, dtype=labels.dtype),
-            labels[:, :-1]
-        ], dim=1)
-        
-        # Mask padding tokens trong labels với -100
+        # Với T5, các token padding trong labels nên được thay bằng -100 để hàm loss bỏ qua
         labels[labels == tokenizer.pad_token_id] = -100
         
         # Tạo decoder_attention_mask
-        decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).float()
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
+        temp_decoder_input_ids[temp_decoder_input_ids == -100] = tokenizer.pad_token_id
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
         
     else:
-        # --- LẤY BATCH CHO PRE-TRAINING (T5 span corruption) ---
+        # --- LẤY BATCH CHO PRE-TRAINING (logic cũ) ---
         batch_input_ids = []
         batch_labels = []
         
@@ -331,54 +295,39 @@ def get_batch(split):
             article_tokens = data[np.random.randint(len(data))]
             input_tokens, target_tokens = create_t5_spans(article_tokens)
             
-            # Padding và truncation
-            if len(input_tokens) > max_source_length:
-                input_tokens = input_tokens[:max_source_length]
-            else:
-                input_tokens = input_tokens + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+            # Cắt bớt và đệm
+            input_padded = input_tokens[:max_source_length] + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
+            labels_padded = target_tokens[:max_target_length] + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
             
-            if len(target_tokens) > max_target_length:
-                target_tokens = target_tokens[:max_target_length]
-            else:
-                target_tokens = target_tokens + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
-            
-            batch_input_ids.append(input_tokens)
-            batch_labels.append(target_tokens)
+            batch_input_ids.append(input_padded)
+            batch_labels.append(labels_padded)
         
-        # Convert to tensors
+        # Chuyển thành tensor
         input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
         labels = torch.tensor(batch_labels, dtype=torch.long)
         
-        # Create attention masks
+        # Tạo attention mask
         attention_mask = (input_ids != tokenizer.pad_token_id).float()
         
-        # T5 decoder_input_ids: shift labels right
-        decoder_input_ids = torch.cat([
-            torch.full((labels.shape[0], 1), tokenizer.pad_token_id, dtype=labels.dtype),
-            labels[:, :-1]
-        ], dim=1)
-        
-        # Mask padding trong labels
-        labels[labels == tokenizer.pad_token_id] = -100
-        
-        # Decoder attention mask
-        decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id).float()
+        # Tạo decoder_attention_mask cho pre-training
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
 
-    # Move to device
+    # Chuyển lên GPU
     if device_type == 'cuda':
-        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
-        labels = labels.pin_memory().to(device, non_blocking=True)
-        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
-        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+        input_ids, labels, attention_mask, decoder_attention_mask = (
+            input_ids.pin_memory().to(device, non_blocking=True),
+            labels.pin_memory().to(device, non_blocking=True),
+            attention_mask.pin_memory().to(device, non_blocking=True),
+            decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+        )
     else:
-        input_ids = input_ids.to(device)
-        labels = labels.to(device)
-        decoder_input_ids = decoder_input_ids.to(device)
-        attention_mask = attention_mask.to(device)
-        decoder_attention_mask = decoder_attention_mask.to(device)
+        input_ids, labels, attention_mask, decoder_attention_mask = (
+            input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device)
+        )
     
-    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
+    # Trả về dữ liệu theo format model cần
+    return input_ids, labels, labels, attention_mask, decoder_attention_mask
 
 # Model initialization arguments
 model_args = dict(
@@ -422,19 +371,9 @@ elif init_from == 'resume':
     if not os.path.exists(out_dir):
         raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
 
-    # Tải lại model từ checkpoint đã lưu
+    # Tải lại model từ checkpoint đã lưu. 
+    # from_pretrained sẽ tự động tải cả config và trọng số
     model = ViLegalJERE.from_pretrained(out_dir)
-    
-    # Resize embeddings if vocab size changed
-    if model.config.vocab_size != len(tokenizer):
-        if master_process:
-            print(f"Resizing embeddings from {model.config.vocab_size} to {len(tokenizer)}")
-        model.shared.weight = nn.Parameter(torch.cat([
-            model.shared.weight.data,
-            torch.randn(len(tokenizer) - model.config.vocab_size, model.config.n_embd) * 0.02
-        ], dim=0))
-        model.lm_head.weight = model.shared.weight
-        model.config.vocab_size = len(tokenizer)
     
     # Tải lại trạng thái của optimizer và các biến tiến trình
     optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
@@ -579,8 +518,6 @@ print(f"Mode: {mode_text}, Learning rate: {learning_rate}, Max iters: {max_iters
 
 input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
 print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
-print(f"Attention masks - Encoder: {attention_mask.shape}, Decoder: {decoder_attention_mask.shape}")
-
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -622,8 +559,7 @@ while True:
     if iter_num == 0 and eval_only:
         break
 
-                # Forward pass with gradient accumulation
-    last_loss = 0.0
+    # Forward pass with gradient accumulation
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
@@ -638,13 +574,10 @@ while True:
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
             loss = loss / gradient_accumulation_steps
-            last_loss += loss.item()
         
+        # Get next batch
+        input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
         scaler.scale(loss).backward()
-        
-        # Get next batch for next micro step (except last one)
-        if micro_step < gradient_accumulation_steps - 1:
-            input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
 
     # Gradient clipping
     if grad_clip != 0.0:
@@ -657,9 +590,6 @@ while True:
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
-    
-    # Get next batch for next iteration
-    input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
 
     # Timing and logging
     t1 = time.time()
@@ -669,12 +599,9 @@ while True:
     tokens_trained_B = tokens_trained / 1e9
 
     if iter_num % log_interval == 0 and master_process:
-        lossf = last_loss
+        lossf = loss.item() * gradient_accumulation_steps
         if local_iter_num >= 5:
-            # T5 MFU calculation: 6 * N * tokens_per_batch / (time * 1e12)
-            # N = number of parameters, tokens include both encoder and decoder
-            total_tokens = batch_size * gradient_accumulation_steps * (max_source_length + max_target_length)
-            mfu = get_num_params(raw_model) * total_tokens * 6 / (dt * 1e12)
+            mfu = raw_model.get_num_params() * batch_size * gradient_accumulation_steps * (max_source_length + max_target_length) * 6 / (dt * 1e12)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
         
         tokens_per_sec = tokens_per_iter / dt

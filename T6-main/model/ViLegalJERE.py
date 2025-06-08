@@ -155,23 +155,15 @@ class ViLegalSelfAttention(nn.Module):
         
         # Prepare attention mask for scaled_dot_product_attention
         attn_mask = None
-        if attention_mask is not None:
-            if self.is_cross_attention:
-                # Cross attention: use encoder attention mask
-                if attention_mask.dim() == 2:
-                    # Expand for query length: [B, T_dec, T_enc]
-                    attn_mask = attention_mask.unsqueeze(1).expand(B, T, -1)
-                # Convert to bool (True for valid positions, False for masked)
-                attn_mask = (attn_mask > 0.5).bool()
-                # For SDPA, False means mask out
-                attn_mask = ~attn_mask
-            else:
-                # Self attention with causal mask - let SDPA handle it
-                if not is_causal and attention_mask.dim() == 2:
-                    # Non-causal self attention (encoder)
-                    attn_mask = attention_mask.unsqueeze(1).unsqueeze(1)
-                    attn_mask = (attn_mask > 0.5).bool()
-                    attn_mask = ~attn_mask
+        if attention_mask is not None and not is_causal:
+            # Only use attention mask for non-causal attention
+            if attention_mask.dim() == 2:
+                # Expand for all heads: [B, 1, 1, seq_len]
+                attn_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+            # Convert to bool (True for valid tokens, False for masked)
+            attn_mask = (attn_mask > 0.5).bool()
+            # For scaled_dot_product_attention, we need False for positions to mask
+            attn_mask = ~attn_mask
         
         y = F.scaled_dot_product_attention(
             q.transpose(1, 2),
@@ -229,9 +221,7 @@ class ViLegalDecoderBlock(nn.Module):
         self.ln_3 = RMSNorm(config.n_embd)
 
     def forward(self, x, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None):
-        # Self attention với causal mask (decoder)
         x = x + self.self_attn(self.ln_1(x), attention_mask=attention_mask)
-        # Cross attention với encoder attention mask
         x = x + self.cross_attn(self.ln_2(x), encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask)
         x = x + self.mlp(self.ln_3(x))
         return x
@@ -352,7 +342,7 @@ class ViLegalJERE(PreTrainedModel):
             decoder_input_ids,
             encoder_hidden_states,
             decoder_attention_mask,
-            attention_mask,  # encoder attention mask for cross attention
+            attention_mask,
             output_hidden_states,
         )
         
@@ -360,10 +350,19 @@ class ViLegalJERE(PreTrainedModel):
         loss = None
         
         if labels is not None:
-            # T5-style loss computation: no shifting needed as we use teacher forcing
-            # Labels already include -100 for padding tokens
+            # Handle both -100 (for fine-tuning) and pad_token_id (for pre-training)
+            # Create a mask for valid tokens (not -100 and not pad_token_id)
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
+            # Flatten for loss computation
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+            
+            # Replace pad_token_id with -100 for consistent ignore behavior
+            shift_labels_masked = shift_labels.clone()
+            shift_labels_masked[shift_labels_masked == self.config.pad_token_id] = -100
+            
+            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels_masked.view(-1))
 
         if not return_dict:
             output = (logits,) + decoder_outputs[1:]
