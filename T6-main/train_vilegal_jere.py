@@ -45,7 +45,7 @@ if finetune:
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
-    init_from = 'scratch' # 'scratch' or 'resume'
+    init_from = 'resume' # 'scratch' or 'resume'
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
@@ -623,7 +623,7 @@ while True:
         
         tokens_per_sec = tokens_per_iter / dt
         tokens_per_sec_M = tokens_per_sec / 1_000_000
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, tps (M) {tokens_per_sec_M:.2f}, tokens trained {tokens_trained_B:.2f}B")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%, tps (M) {tokens_per_sec_M:.2f}, tokens trained {tokens_trained:.2f}B")
 
         if wandb_log:
             wandb.log({
