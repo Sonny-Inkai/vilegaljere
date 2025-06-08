@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = True # Đổi thành True khi cháu muốn chạy fine-tuning
+finetune = False # Đổi thành True khi cháu muốn chạy fine-tuning
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -46,7 +46,7 @@ if finetune:
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
-    init_from = 'resume' # 'scratch' or 'resume'
+    init_from = 'scratch' # 'scratch' or 'resume'
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
