@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = True # Đổi thành True khi cháu muốn chạy fine-tuning
+finetune = False # Đổi thành True khi cháu muốn chạy fine-tuning
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -51,7 +51,7 @@ else:
     
     # Siêu tham số cho pre-training
     learning_rate = 1e-4  # Good for T5-small
-    max_iters = 10     # Reduced for smaller model
+    max_iters = 20     # Reduced for smaller model
     batch_size = 1      # Even smaller for T4 memory constraints
     gradient_accumulation_steps = 1   # Reduced to avoid memory issues
     weight_decay = 1e-2
