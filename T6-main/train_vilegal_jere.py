@@ -29,8 +29,8 @@ os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
 if finetune:
     # --- CẤU HÌNH CHO FINE-TUNING ---
     init_from = 'resume' # Bắt buộc phải resume từ model đã pre-trained
-    data_path = "/kaggle/input/your-finetune-dataset" # Nơi chứa file finetune.txt
-    finetune_file_name = "finetune.txt"
+    data_path = "/kaggle/input/vietnamese-legal-dataset-finetuning" # Nơi chứa file finetune.txt
+    finetune_file_name = "finetune.json"
     out_dir = '/kaggle/working/out_vilegal_t5small' # Thư mục chứa checkpoint pre-trained
     
     # Siêu tham số cho fine-tuning
@@ -39,9 +39,9 @@ if finetune:
     batch_size = 4       # Batch size có thể nhỏ hơn
     gradient_accumulation_steps = 2
     weight_decay = 0.01
-    eval_interval = 100
-    log_interval = 10
-    eval_iters = 10
+    eval_interval = 1
+    log_interval = 1
+    eval_iters = 1
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -82,7 +82,7 @@ using_groupnorm = True
 optimizer_name = 'adamw'
 beta1 = 0.9
 beta2 = 0.999
-grad_clip = 1.0
+grad_clip = 0.9
 # learning rate decay settings
 decay_lr = True
 warmup_iters = 2000   # Longer warmup for stability
@@ -175,7 +175,7 @@ def load_legal_data():
     return tokenized_data
 
 def load_finetune_data():
-    """Tải và xử lý dữ liệu từ file finetune.txt (JSON) cho fine-tuning"""
+    """Tải và xử lý dữ liệu từ file finetune.json (JSON) cho fine-tuning"""
     data_file = os.path.join(data_path, finetune_file_name)
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Finetune dataset not found at {data_file}")
@@ -257,7 +257,7 @@ else:
     print(f"Loaded {len(all_data)} legal articles")
 
 # Split train/val
-split_idx = int(0.95 * len(all_data))
+split_idx = int(0.9 * len(all_data))
 train_data = all_data[:split_idx]
 val_data = all_data[split_idx:]
 print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
