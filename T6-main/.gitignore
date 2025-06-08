@@ -26,4 +26,6 @@ data/fineweb-edu10B/
 data/fineweb-edu100B/
 data/fineweb-edu350B/
 
+google_T5/
+
 output/out/*
