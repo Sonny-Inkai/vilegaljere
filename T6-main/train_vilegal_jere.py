@@ -282,6 +282,7 @@ def get_batch(split):
         # This mask is based on shifted labels to correctly mask padding in the decoder's self-attention.
         temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
         decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        decoder_input_ids = temp_decoder_input_ids
         
     else:
         # --- LẤY BATCH CHO PRE-TRAINING (logic cũ) ---
@@ -309,22 +310,24 @@ def get_batch(split):
         # Tạo decoder_attention_mask cho pre-training
         temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
         decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        decoder_input_ids = temp_decoder_input_ids
 
     # Chuyển lên GPU
     if device_type == 'cuda':
-        input_ids, labels, attention_mask, decoder_attention_mask = (
+        input_ids, labels, attention_mask, decoder_attention_mask, decoder_input_ids = (
             input_ids.pin_memory().to(device, non_blocking=True),
             labels.pin_memory().to(device, non_blocking=True),
             attention_mask.pin_memory().to(device, non_blocking=True),
-            decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+            decoder_attention_mask.pin_memory().to(device, non_blocking=True),
+            decoder_input_ids.pin_memory().to(device, non_blocking=True)
         )
     else:
-        input_ids, labels, attention_mask, decoder_attention_mask = (
-            input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device)
+        input_ids, labels, attention_mask, decoder_attention_mask, decoder_input_ids = (
+            input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device), decoder_input_ids.to(device)
         )
     
     # Trả về dữ liệu theo format model cần
-    return input_ids, labels, labels, attention_mask, decoder_attention_mask
+    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
 
 # Model initialization arguments
 model_args = dict(
