@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = True # Đổi thành True khi cháu muốn chạy fine-tuning
+finetune = False
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -35,13 +35,13 @@ if finetune:
     
     # Siêu tham số cho fine-tuning
     learning_rate = 3e-5 # Learning rate nhỏ hơn nhiều
-    max_iters = 10    # Số vòng lặp ít hơn
-    batch_size = 1       # Batch size có thể nhỏ hơn
-    gradient_accumulation_steps = 2
-    weight_decay = 0.01
-    eval_interval = 1
+    max_iters = 3000    # Số vòng lặp ít hơn
+    batch_size = 8       # Batch size có thể nhỏ hơn
+    gradient_accumulation_steps = 4
+    weight_decay = 0.001
+    eval_interval = 100
     log_interval = 1
-    eval_iters = 1
+    eval_iters = 20
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -50,14 +50,14 @@ else:
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
     # Siêu tham số cho pre-training
-    learning_rate = 1e-4  # Good for T5-small
-    max_iters = 2     # Very small for testing
-    batch_size = 1      # Even smaller for T4 memory constraints
-    gradient_accumulation_steps = 1   # Reduced to avoid memory issues
-    weight_decay = 1e-2
-    eval_interval = 1  # More frequent eval for shorter training
+    learning_rate = 3e-4  # Good for T5-small
+    max_iters = 50000     # Very small for testing
+    batch_size = 16      # Even smaller for T4 memory constraints
+    gradient_accumulation_steps = 4   # Reduced to avoid memory issues
+    weight_decay = 1e-3
+    eval_interval = 500  # More frequent eval for shorter training
     log_interval = 1   # More frequent logging
-    eval_iters = 1     # Fewer eval iterations to save time
+    eval_iters = 200     # Fewer eval iterations to save time
     
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -67,7 +67,7 @@ wandb_run_name = 'vilegal_t5small_kaggle'
 dataset = 'vietnamese_legal'
 block_size = 512    # Keep same
 max_source_length = 512  # encoder max length
-max_target_length = 256  # decoder max length
+max_target_length = 512  # decoder max length
 # model - T5-small architecture (~60M parameters)
 n_layer = 6         # T5-small has 6 layers each for encoder/decoder
 n_head = 8          # T5-small uses 8 attention heads
@@ -82,7 +82,7 @@ using_groupnorm = True
 optimizer_name = 'adamw'
 beta1 = 0.9
 beta2 = 0.999
-grad_clip = 0.9
+grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
 warmup_iters = 2000   # Longer warmup for stability
@@ -94,7 +94,7 @@ schedule = 'cosine'
 model_type = 'ViLegalJERE'
 # system
 device = 'cuda'  
-dtype = 'float16'   # Use float32 for kaggle t4x2
+dtype = 'float16'   
 compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
