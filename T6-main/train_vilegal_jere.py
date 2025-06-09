@@ -159,7 +159,8 @@ def load_legal_data():
         raise FileNotFoundError(f"Dataset not found at {data_file}")
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
-    articles = [art for art in text]
+
+    articles = text.split('\n')
     tokenized_data = [tokenizer.encode(art, truncation=True, max_length=block_size) for art in articles]
     return tokenized_data
 
