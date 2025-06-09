@@ -35,7 +35,7 @@ if finetune:
     
     # Siêu tham số cho fine-tuning
     learning_rate = 3e-5 # Learning rate nhỏ hơn nhiều
-    max_iters = 3000    # Số vòng lặp ít hơn
+    max_iters = 13000    # Số vòng lặp ít hơn
     batch_size = 8       # Batch size có thể nhỏ hơn
     gradient_accumulation_steps = 4
     weight_decay = 0.001
