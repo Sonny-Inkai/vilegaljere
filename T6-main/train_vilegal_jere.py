@@ -40,7 +40,7 @@ if finetune:
     gradient_accumulation_steps = 4
     weight_decay = 0.001
     eval_interval = 100
-    log_interval = 100
+    log_interval = 10
     eval_iters = 20
     
 else:
@@ -56,7 +56,7 @@ else:
     gradient_accumulation_steps = 4   # Reduced to avoid memory issues
     weight_decay = 1e-3
     eval_interval = 500  # More frequent eval for shorter training
-    log_interval = 100   # More frequent logging
+    log_interval = 10   # More frequent logging
     eval_iters = 200     # Fewer eval iterations to save time
     
 # wandb logging
