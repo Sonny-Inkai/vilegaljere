@@ -40,7 +40,7 @@ if finetune:
     gradient_accumulation_steps = 4
     weight_decay = 0.001
     eval_interval = 100
-    log_interval = 1
+    log_interval = 100
     eval_iters = 20
     
 else:
@@ -51,12 +51,12 @@ else:
     
     # Siêu tham số cho pre-training
     learning_rate = 3e-4  # Good for T5-small
-    max_iters = 50000     # Very small for testing
+    max_iters = 10000     # Very small for testing
     batch_size = 16      # Even smaller for T4 memory constraints
     gradient_accumulation_steps = 4   # Reduced to avoid memory issues
     weight_decay = 1e-3
     eval_interval = 500  # More frequent eval for shorter training
-    log_interval = 1   # More frequent logging
+    log_interval = 100   # More frequent logging
     eval_iters = 200     # Fewer eval iterations to save time
     
 # wandb logging
