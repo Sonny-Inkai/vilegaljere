@@ -159,9 +159,9 @@ def load_legal_data():
         raise FileNotFoundError(f"Dataset not found at {data_file}")
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
-    articles = [art for art in text][:10]
+    articles = [art for art in text]
     tokenized_data = [tokenizer.encode(art, truncation=True, max_length=block_size) for art in articles]
-    return tokenized_data[:10]
+    return tokenized_data
 
 def load_finetune_data():
     """Tải và xử lý dữ liệu từ file finetune.json (JSON) cho fine-tuning"""
@@ -183,7 +183,7 @@ def load_finetune_data():
     
     if master_process:
         print(f"Loaded {len(processed_data)} fine-tuning pairs")
-    return processed_data[:10]
+    return processed_data
 
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     """
