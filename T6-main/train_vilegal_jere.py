@@ -35,13 +35,13 @@ if finetune:
     
     # Siêu tham số cho fine-tuning
     learning_rate = 1e-4 # T5 fine-tuning thường hoạt động tốt hơn với LR cao hơn một chút
-    max_iters = 20    # Số vòng lặp ít hơn
-    batch_size = 32       # Batch size có thể nhỏ hơn
-    gradient_accumulation_steps = 2
+    max_iters = 13000    # Số vòng lặp ít hơn
+    batch_size = 8       # Batch size có thể nhỏ hơn
+    gradient_accumulation_steps = 4
     weight_decay = 0.001
-    eval_interval = 1#100
-    log_interval = 1#10
-    eval_iters = 1#20
+    eval_interval = 100
+    log_interval = 10
+    eval_iters = 20
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -51,13 +51,13 @@ else:
     
     # Siêu tham số cho pre-training
     learning_rate = 3e-4  # Good for T5-small
-    max_iters = 10 #10000     # Very small for testing
-    batch_size = 32      # Even smaller for T4 memory constraints
+    max_iters = 10000     # Very small for testing
+    batch_size = 16      # Even smaller for T4 memory constraints
     gradient_accumulation_steps = 4   # Reduced to avoid memory issues
     weight_decay = 1e-3
-    eval_interval = 1#500  # More frequent eval for shorter training
-    log_interval = 1   # More frequent logging
-    eval_iters = 1#200     # Fewer eval iterations to save time
+    eval_interval = 500  # More frequent eval for shorter training
+    log_interval = 10   # More frequent logging
+    eval_iters = 200     # Fewer eval iterations to save time
     
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -347,7 +347,7 @@ def get_batch(split):
                                    max_length=max_target_length, return_tensors="pt")
         
         input_ids = input_encodings.input_ids
-        attention_mask = input_encodings.attention_mask
+        attention_mask = input_encodings.attention_mask.to(torch.bool)
         labels = target_encodings.input_ids
         
         # ✅ Tạo decoder_input_ids đúng cách với eos_token_id
