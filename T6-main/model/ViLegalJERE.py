@@ -163,18 +163,17 @@ class ViLegalSelfAttention(nn.Module):
 
         is_causal = not self.is_cross_attention
         
-        # Prepare attention mask for scaled_dot_product_attention
         attn_mask_for_spda = None
         if attention_mask is not None:
-            # For scaled_dot_product_attention, we need a boolean mask where True means "mask this position".
-            # The input attention_mask has 1.0 for valid tokens and 0.0 for padding.
-            # This mask will be combined with the causal mask by F.scaled_dot_product_attention.
-            if attention_mask.dim() == 2:
-                # expand to [B, 1, T_src] or [B, 1, T_tgt, T_tgt]
-                attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
-
-            # Invert the mask: True for padding, False for valid tokens.
-            attn_mask_for_spda = ~(attention_mask > 0.5)
+            # The training script provides a mask with `True` for tokens to keep.
+            # `F.scaled_dot_product_attention` expects `True` for tokens to MASK.
+            # Therefore, we need to invert the mask.
+            inverted_mask = ~attention_mask
+            if inverted_mask.dim() == 2:
+                # Add dimensions for broadcasting over heads and query length
+                attn_mask_for_spda = inverted_mask.unsqueeze(1).unsqueeze(1)
+            else:
+                attn_mask_for_spda = inverted_mask
         
         y = F.scaled_dot_product_attention(
             q.transpose(1, 2),
@@ -237,26 +236,44 @@ class ViLegalDecoderBlock(nn.Module):
         x = x + self.mlp(self.ln_3(x))
         return x
 
-@dataclass
 class ViLegalConfig(PretrainedConfig):
     model_type = "vilegal_jere"
-    vocab_size: int = 10100
-    n_layer: int = 12
-    n_head: int = 16
-    head_dim: int = 64
-    n_embd: int = 1024
-    rank: int = 4
-    q_rank: int = 8
-    block_size: int = 2048
-    bias: bool = False
-    dropout: float = 0.0
-    using_groupnorm: bool = True
-    pad_token_id: int = 0
-    eos_token_id: int = 1
-    decoder_start_token_id: int = 0
     
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        vocab_size: int = 10100,
+        n_layer: int = 12,
+        n_head: int = 16,
+        head_dim: int = 64,
+        n_embd: int = 1024,
+        rank: int = 4,
+        q_rank: int = 8,
+        block_size: int = 2048,
+        bias: bool = False,
+        dropout: float = 0.0,
+        using_groupnorm: bool = True,
+        pad_token_id: int = 0,
+        eos_token_id: int = 3,
+        decoder_start_token_id: int = 3,
+        **kwargs
+    ):
+        self.vocab_size = vocab_size
+        self.n_layer = n_layer
+        self.n_head = n_head
+        self.head_dim = head_dim
+        self.n_embd = n_embd
+        self.rank = rank
+        self.q_rank = q_rank
+        self.block_size = block_size
+        self.bias = bias
+        self.dropout = dropout
+        self.using_groupnorm = using_groupnorm
+        super().__init__(
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            decoder_start_token_id=decoder_start_token_id,
+            **kwargs
+        )
 
 class ViLegalJERE(PreTrainedModel):
     config_class = ViLegalConfig
@@ -364,15 +381,12 @@ class ViLegalJERE(PreTrainedModel):
         loss = None
         
         if labels is not None:
-            # Handle both -100 (for fine-tuning) and pad_token_id (for pre-training)
-            # Create a mask for valid tokens (not -100 and not pad_token_id)
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             
-            # Flatten for loss computation
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
             
-            # Replace pad_token_id with -100 for consistent ignore behavior
+            # ✅ FIXED: Properly mask pad tokens (id=0) to ignore in loss
             shift_labels_masked = shift_labels.clone()
             shift_labels_masked[shift_labels_masked == self.config.pad_token_id] = -100
             
@@ -454,8 +468,18 @@ class ViLegalJERE(PreTrainedModel):
         pad_token_id=None,
         eos_token_id=None,
     ):
-        pad_token_id = pad_token_id or self.config.pad_token_id
-        eos_token_id = eos_token_id or self.config.eos_token_id
+        # ✅ FIXED: Handle None values properly by falling back to config
+        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
+        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        decoder_start_token_id = self.config.decoder_start_token_id
+        
+        # Fallback to sensible defaults if config values are somehow still None
+        if pad_token_id is None:
+            pad_token_id = 0
+        if eos_token_id is None:
+            eos_token_id = 3
+        if decoder_start_token_id is None:
+            decoder_start_token_id = eos_token_id
         
         batch_size = input_ids.shape[0]
         device = input_ids.device
@@ -464,8 +488,8 @@ class ViLegalJERE(PreTrainedModel):
         encoder_outputs = self.encode(input_ids, attention_mask)
         encoder_hidden_states = encoder_outputs.last_hidden_state
         
-        # Initialize decoder input
-        decoder_input_ids = torch.full((batch_size, 1), self.config.decoder_start_token_id, device=device)
+        # Initialize decoder input with proper token type
+        decoder_input_ids = torch.full((batch_size, 1), decoder_start_token_id, dtype=torch.long, device=device)
         
         # Generate tokens
         for _ in range(max_length - 1):
