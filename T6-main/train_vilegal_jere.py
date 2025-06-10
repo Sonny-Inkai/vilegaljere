@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = True
+finetune = False
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -85,8 +85,8 @@ beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 1300   # Khoảng 10% tổng số steps là một lựa chọn tốt
-lr_decay_iters = 13000
+warmup_iters = 1000   # Khoảng 10% tổng số steps là một lựa chọn tốt
+lr_decay_iters = 10000
 min_lr = 1e-6
 # DDP settings for Kaggle T4x2
 backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
