@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = False
+finetune = True
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -99,9 +99,9 @@ compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) if os.path.exists('configurator.py') else None
-config = {k: globals()[k] for k in config_keys}
+# config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+# exec(open('configurator.py').read()) if os.path.exists('configurator.py') else None
+# config = {k: globals()[k] for k in config_keys}
 
 # Import ViLegalJERE model
 from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
