@@ -7,12 +7,6 @@ import subprocess
 import sys
 import os
 
-def install_requirements():
-    """Install required packages"""
-    print("Installing requirements...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", 
-                          "torch", "transformers", "pytorch-lightning", 
-                          "datasets", "tqdm", "tensorboard"])
 
 def run_training():
     """Run the training script"""
@@ -54,8 +48,7 @@ def run_evaluation(model_path=None):
         print(f"Model path {model_path} or test data {test_data_path} not found!")
 
 if __name__ == "__main__":
-    # Install requirements
-    install_requirements()
+    
     
     # Run training
     run_training()
