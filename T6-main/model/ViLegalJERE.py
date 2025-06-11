@@ -64,6 +64,7 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3).type_as(x)
 
 class CPLinear(nn.Module):
+    # Bilinear form of x using CP decomposition
     def __init__(self, in_features, n_head, head_dim, rank: int = 2, q_rank: int = 8):
         super(CPLinear, self).__init__()
         self.in_features = in_features
@@ -79,6 +80,8 @@ class CPLinear(nn.Module):
         self.W_B_q = nn.Linear(in_features, q_rank * head_dim, bias=False)
         self.W_B_k = nn.Linear(in_features, rank * head_dim, bias=False)
         self.W_B_v = nn.Linear(in_features, rank * head_dim, bias=False)
+        
+        # ✅ FIXED: Only add rotary for self-attention, NOT cross-attention
         self.rotary = Rotary(self.head_dim)
         self.reset_parameters()
 
@@ -103,7 +106,8 @@ class CPLinear(nn.Module):
         self.W_B_k.weight.data = W_B_k_tensor.view_as(self.W_B_k.weight)
         self.W_B_v.weight.data = W_B_v_tensor.view_as(self.W_B_v.weight)
         
-    def forward(self, x):
+    def forward(self, x, apply_rope=True):
+        # ✅ FIXED: Add apply_rope parameter to control RoPE usage
         batch_size, seq_len, _ = x.size()
 
         A_q = self.W_A_q(x).view(batch_size, seq_len, self.n_head, self.q_rank)
@@ -114,8 +118,10 @@ class CPLinear(nn.Module):
         B_k = self.W_B_k(x).view(batch_size, seq_len, self.rank, self.head_dim)
         B_v = self.W_B_v(x).view(batch_size, seq_len, self.rank, self.head_dim)
         
-        cos, sin = self.rotary(B_q)
-        B_q, B_k = apply_rotary_emb(B_q, cos, sin), apply_rotary_emb(B_k, cos, sin)
+        # ✅ FIXED: Only apply RoPE when requested (for self-attention)
+        if apply_rope:
+            cos, sin = self.rotary(B_q)
+            B_q, B_k = apply_rotary_emb(B_q, cos, sin), apply_rotary_emb(B_k, cos, sin)
         
         A_q = A_q.view(batch_size * seq_len, self.n_head, self.q_rank)
         A_k = A_k.view(batch_size * seq_len, self.n_head, self.rank)
@@ -132,7 +138,7 @@ class CPLinear(nn.Module):
         return q, k, v
 
 class ViLegalSelfAttention(nn.Module):
-    def __init__(self, config, is_cross_attention=False):
+    def __init__(self, config, is_cross_attention=False, is_causal=False):
         super().__init__()
         self.n_head = config.n_head
         self.head_dim = config.head_dim
@@ -140,10 +146,17 @@ class ViLegalSelfAttention(nn.Module):
         self.rank = config.rank
         self.q_rank = config.q_rank
         self.is_cross_attention = is_cross_attention
+        self.is_causal = is_causal
 
-        self.c_qkv = CPLinear(self.n_embd, self.n_head, self.head_dim, self.rank, self.q_rank)
+        # ✅ FIXED: Proper Q/K/V setup for cross-attention
         if is_cross_attention:
-            self.c_kv = CPLinear(self.n_embd, self.n_head, self.head_dim, self.rank, self.q_rank)
+            # Cross-attention: Q from decoder, K/V from encoder
+            self.c_q = CPLinear(self.n_embd, self.n_head, self.head_dim, self.q_rank, self.q_rank)
+            self.c_kv = CPLinear(self.n_embd, self.n_head, self.head_dim, self.rank, self.rank)
+            # ✅ NO RoPE for cross-attention
+        else:
+            # Self-attention: Q/K/V from same input
+            self.c_qkv = CPLinear(self.n_embd, self.n_head, self.head_dim, self.rank, self.q_rank)
 
         self.c_proj = nn.Linear(self.n_head * self.head_dim, self.n_embd, bias=False)
         self.c_proj.weight.data.zero_()
@@ -156,31 +169,33 @@ class ViLegalSelfAttention(nn.Module):
         B, T, C = x.size()
 
         if self.is_cross_attention and encoder_hidden_states is not None:
-            q, _, _ = self.c_qkv(x)
-            _, k, v = self.c_kv(encoder_hidden_states)
+            # ✅ FIXED: Proper cross-attention implementation 
+            q, _, _ = self.c_q(x, apply_rope=False)  # Query from decoder input, NO RoPE
+            _, k, v = self.c_kv(encoder_hidden_states, apply_rope=False)  # Key/Value from encoder, NO RoPE
         else:
-            q, k, v = self.c_qkv(x)
+            # Self-attention with RoPE
+            q, k, v = self.c_qkv(x, apply_rope=True)  # Apply RoPE for self-attention
 
-        is_causal = not self.is_cross_attention
-        
+        # ✅ FIXED: Proper attention mask handling
         attn_mask_for_spda = None
         if attention_mask is not None:
-            # The training script provides a mask with `True` for tokens to keep.
-            # `F.scaled_dot_product_attention` expects `True` for tokens to MASK.
-            # Therefore, we need to invert the mask.
-            inverted_mask = ~attention_mask
-            if inverted_mask.dim() == 2:
-                # Add dimensions for broadcasting over heads and query length
-                attn_mask_for_spda = inverted_mask.unsqueeze(1).unsqueeze(1)
+            # Convert boolean mask to additive mask for scaled_dot_product_attention
+            # True = keep token, False = mask token
+            if attention_mask.dtype == torch.bool:
+                attn_mask_for_spda = ~attention_mask  # Invert for SDPA (True = mask)
             else:
-                attn_mask_for_spda = inverted_mask
+                attn_mask_for_spda = attention_mask == 0  # 0 = mask, 1 = keep
+            
+            # Ensure proper shape for SDPA: [batch, 1, seq_len, seq_len] or [batch, heads, seq_len, seq_len]
+            if attn_mask_for_spda.dim() == 2:
+                attn_mask_for_spda = attn_mask_for_spda.unsqueeze(1).unsqueeze(1)
         
         y = F.scaled_dot_product_attention(
-            q.transpose(1, 2),
+            q.transpose(1, 2),  # (B, n_head, T, head_dim)
             k.transpose(1, 2),
             v.transpose(1, 2),
             attn_mask=attn_mask_for_spda,
-            is_causal=is_causal
+            is_causal=self.is_causal and not self.is_cross_attention  # ✅ No causal for cross-attention
         )
         
         if self.using_groupnorm:
@@ -210,7 +225,7 @@ class SwiGLU(nn.Module):
 class ViLegalEncoderBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.self_attn = ViLegalSelfAttention(config, is_cross_attention=False)
+        self.self_attn = ViLegalSelfAttention(config, is_causal=False)
         self.mlp = SwiGLU(config)
         self.ln_1 = RMSNorm(config.n_embd)
         self.ln_2 = RMSNorm(config.n_embd)
@@ -223,7 +238,7 @@ class ViLegalEncoderBlock(nn.Module):
 class ViLegalDecoderBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.self_attn = ViLegalSelfAttention(config, is_cross_attention=False)
+        self.self_attn = ViLegalSelfAttention(config, is_causal=True)
         self.cross_attn = ViLegalSelfAttention(config, is_cross_attention=True)
         self.mlp = SwiGLU(config)
         self.ln_1 = RMSNorm(config.n_embd)
@@ -231,8 +246,15 @@ class ViLegalDecoderBlock(nn.Module):
         self.ln_3 = RMSNorm(config.n_embd)
 
     def forward(self, x, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None):
+        # ✅ FIXED: T5 decoder block order per Google reference
+        # 1. Self-attention (causal) - sử dụng attention_mask cho decoder tokens
         x = x + self.self_attn(self.ln_1(x), attention_mask=attention_mask)
-        x = x + self.cross_attn(self.ln_2(x), encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask)
+        
+        # 2. Cross-attention with encoder - sử dụng encoder_attention_mask cho encoder tokens
+        if encoder_hidden_states is not None:
+            x = x + self.cross_attn(self.ln_2(x), encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask)
+        
+        # 3. Feed-forward MLP
         x = x + self.mlp(self.ln_3(x))
         return x
 
@@ -368,13 +390,13 @@ class ViLegalJERE(PreTrainedModel):
         else:
             encoder_hidden_states = None
             
-        # Decoder
+        # Decoder - ✅ FIXED: Pass attention masks correctly
         decoder_outputs = self.decode(
             decoder_input_ids,
             encoder_hidden_states,
-            decoder_attention_mask,
-            attention_mask,
-            output_hidden_states,
+            attention_mask=decoder_attention_mask,  # Decoder self-attention mask
+            encoder_attention_mask=attention_mask,  # Encoder cross-attention mask  
+            output_hidden_states=output_hidden_states,
         )
         
         logits = decoder_outputs.logits
@@ -441,8 +463,8 @@ class ViLegalJERE(PreTrainedModel):
             x = block(
                 x,
                 encoder_hidden_states=encoder_hidden_states,
-                attention_mask=attention_mask,
-                encoder_attention_mask=encoder_attention_mask,
+                attention_mask=attention_mask,  # For decoder self-attention (causal)
+                encoder_attention_mask=encoder_attention_mask,  # For encoder cross-attention
             )
             
         x = self.decoder_ln(x)

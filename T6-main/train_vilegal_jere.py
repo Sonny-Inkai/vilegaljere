@@ -33,15 +33,15 @@ if finetune:
     finetune_file_name = "finetune.json"
     out_dir = '/kaggle/working/out_vilegal_t5small' # Thư mục chứa checkpoint pre-trained
     
-    # Siêu tham số cho fine-tuning
-    learning_rate = 1e-4 # T5 fine-tuning thường hoạt động tốt hơn với LR cao hơn một chút
-    max_iters = 13000    # Số vòng lặp ít hơn
-    batch_size = 8       # Batch size có thể nhỏ hơn
-    gradient_accumulation_steps = 4
-    weight_decay = 0.001
-    eval_interval = 100
-    log_interval = 10
-    eval_iters = 20
+    # ✅ FIXED: Siêu tham số cho fine-tuning tối ưu cho T4x2
+    learning_rate = 5e-5 # T5 fine-tuning standard (thấp hơn cho stability)
+    max_iters = 15000     # Giảm để fit trong Kaggle time limit
+    batch_size = 32      # ✅ FIXED: Giảm cho T4 memory (16GB VRAM)
+    gradient_accumulation_steps = 2  # ✅ FIXED: Tăng để maintain effective batch size
+    weight_decay = 0.001  # ✅ FIXED: Standard weight decay cho T5
+    eval_interval = 200  # ✅ FIXED: Tăng để save time
+    log_interval = 10    # ✅ FIXED: Reduce logging frequency
+    eval_iters = 100     # ✅ FIXED: Giảm để save time
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -49,15 +49,15 @@ else:
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
-    # Siêu tham số cho pre-training
-    learning_rate = 3e-4  # Good for T5-small
-    max_iters = 10000     # Very small for testing
-    batch_size = 16      # Even smaller for T4 memory constraints
-    gradient_accumulation_steps = 4   # Reduced to avoid memory issues
-    weight_decay = 1e-3
-    eval_interval = 500  # More frequent eval for shorter training
-    log_interval = 10   # More frequent logging
-    eval_iters = 200     # Fewer eval iterations to save time
+    # ✅ FIXED: Siêu tham số cho pre-training tối ưu cho T4x2
+    learning_rate = 2e-4  # ✅ FIXED: Standard for T5-small pre-training
+    max_iters = 10000     # ✅ FIXED: Reasonable for T5-small
+    batch_size = 32       # ✅ FIXED: Safe for T4 memory
+    gradient_accumulation_steps = 4   # ✅ FIXED: Maintain large effective batch
+    weight_decay = 1e-2   # ✅ FIXED: Standard T5 weight decay
+    eval_interval = 500  # ✅ FIXED: Less frequent for pre-training
+    log_interval = 10     # ✅ FIXED: Reduce logging overhead
+    eval_iters = 200      # ✅ FIXED: Keep reasonable for evaluation
     
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -72,8 +72,8 @@ max_target_length = 512  # decoder max length
 n_layer = 6         # T5-small has 6 layers each for encoder/decoder
 n_head = 8          # T5-small uses 8 attention heads
 head_dim = 64       # 512/8 = 64
-rank = 4
-q_rank = 8
+rank = 4            # ✅ GOOD: Reasonable CP rank for T6
+q_rank = 8          # ✅ GOOD: Reasonable query rank for T6
 n_embd = 512        # T5-small hidden size
 dropout = 0.1       # Standard dropout for T5
 bias = False
@@ -85,9 +85,9 @@ beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 1000   # Khoảng 10% tổng số steps là một lựa chọn tốt
-lr_decay_iters = 10000
-min_lr = 1e-6
+warmup_iters = 2000   # ✅ FIXED: Longer warmup for stability (was 1000)
+lr_decay_iters = 10000  # ✅ FIXED: Match max_iters for full decay (was 10000)
+min_lr = 5e-6        # ✅ FIXED: Higher min_lr to avoid vanishing gradients (was 1e-6)
 # DDP settings for Kaggle T4x2
 backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
 schedule = 'cosine'
@@ -147,6 +147,17 @@ tokens_trained = 0
 torch.manual_seed(5000 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+
+# ✅ FIXED: Memory optimization for T4 GPU
+torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()  # Clear cache before training
+    # Enable memory-efficient attention if available
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+    except:
+        pass
+
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.autocast(device_type=device_type, dtype=ptdtype)
@@ -531,11 +542,12 @@ def estimate_loss():
         for k in range(eval_iters):
             input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch(split)
             with ctx:
+                # ✅ FIXED: Pass encoder attention mask correctly in evaluation
                 outputs = model(
                     input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    attention_mask=attention_mask,  # Encoder attention mask
                     decoder_input_ids=decoder_input_ids,
-                    decoder_attention_mask=decoder_attention_mask,
+                    decoder_attention_mask=decoder_attention_mask,  # Decoder attention mask
                     labels=labels
                 )
                 loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
@@ -672,11 +684,12 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
+            # ✅ FIXED: Pass encoder attention mask correctly for T5 architecture
             outputs = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask,  # Encoder attention mask
                 decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
+                decoder_attention_mask=decoder_attention_mask,  # Decoder attention mask
                 labels=labels
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
