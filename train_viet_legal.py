@@ -43,9 +43,12 @@ class VietnameseLegalDataset(Dataset):
         input_text = item['formatted_context_sent']
         target_text = item['extracted_relations_text']
         
+        # Add instruction prefix to help model understand the task
+        input_with_instruction = f"Trích xuất entities và relations từ văn bản luật sau: {input_text}"
+        
         # Tokenize input
         model_inputs = self.tokenizer(
-            input_text,
+            input_with_instruction,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
@@ -213,8 +216,8 @@ def main():
     # Initialize model
     model = VietLegalModel(
         model_name=model_name,
-        learning_rate=5e-5,
-        warmup_steps=1000,
+        learning_rate=3e-4,  # Higher learning rate for better convergence
+        warmup_steps=500,
         train_dataset_path=os.path.join(data_path, finetune_file_name),
         val_dataset_path=os.path.join(test_data_path, test_file_name),
         batch_size=4,
@@ -247,15 +250,15 @@ def main():
     
     # Trainer
     trainer = pl.Trainer(
-        max_epochs=10,
+        max_epochs=20,  # More epochs for better learning
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
         callbacks=[checkpoint_callback, early_stop_callback, lr_monitor],
         logger=logger,
         gradient_clip_val=1.0,
-        accumulate_grad_batches=4,  # Effective batch size = 4 * 4 = 16
+        accumulate_grad_batches=8,  # Larger effective batch size = 4 * 8 = 32
         precision=16 if torch.cuda.is_available() else 32,
-        val_check_interval=0.5,  # Validate twice per epoch
+        val_check_interval=0.25,  # Validate more frequently
     )
     
     # Train

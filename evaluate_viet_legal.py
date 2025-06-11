@@ -173,23 +173,30 @@ class VietLegalEvaluator:
         
     def predict(self, input_text: str, max_length: int = 512, num_beams: int = 5) -> str:
         """Generate prediction for input text"""
+        # Add same instruction prefix as training
+        input_with_instruction = f"Trích xuất entities và relations từ văn bản luật sau: {input_text}"
+        
         # Tokenize input
         inputs = self.tokenizer(
-            input_text,
+            input_with_instruction,
             max_length=max_length,
             padding=True,
             truncation=True,
             return_tensors='pt'
         ).to(self.device)
         
-        # Generate
+        # Generate with better parameters
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_length=max_length,
+                min_length=20,
                 num_beams=num_beams,
                 early_stopping=True,
-                do_sample=False
+                do_sample=False,
+                repetition_penalty=1.2,  # Reduce repetition
+                no_repeat_ngram_size=3,  # Avoid repeating 3-grams
+                length_penalty=1.0
             )
         
         # Decode
