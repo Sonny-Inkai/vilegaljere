@@ -52,15 +52,14 @@ class VietnameseLegalDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Tokenize target
-        with self.tokenizer.as_target_tokenizer():
-            labels = self.tokenizer(
-                target_text,
-                max_length=self.max_length,
-                padding='max_length',
-                truncation=True,
-                return_tensors='pt'
-            )
+        # Tokenize target - using text_target to avoid deprecation warning
+        labels = self.tokenizer(
+            text_target=target_text,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
             
         # Replace padding token id's of the labels by -100 so it's ignored by the loss
         labels['input_ids'][labels['input_ids'] == self.tokenizer.pad_token_id] = -100
@@ -202,6 +201,7 @@ def extract_vietnamese_triplets(text: str) -> List[tuple]:
 def main():
     # Configuration - exactly as requested
     data_path = "/kaggle/input/vietnamese-legal-dataset-finetuning"
+    test_data_path = "/kaggle/input/vietnamese-legal-dataset-finetuning-test"
     finetune_file_name = "finetune.json"  # Your main training file  
     test_file_name = "test.json"  # For validation
     model_name = "VietAI/vit5-base"
@@ -216,7 +216,7 @@ def main():
         learning_rate=5e-5,
         warmup_steps=1000,
         train_dataset_path=os.path.join(data_path, finetune_file_name),
-        val_dataset_path=os.path.join(data_path, test_file_name),
+        val_dataset_path=os.path.join(test_data_path, test_file_name),
         batch_size=4,
         max_length=512
     )
