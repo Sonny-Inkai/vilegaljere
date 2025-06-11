@@ -28,7 +28,7 @@ def run_evaluation(model_path=None):
     if model_path is None:
         model_path = "/kaggle/working/vit5-base/final_model"
     
-    test_data_path = "/kaggle/input/vietnamese-legal-dataset-finetuning/test.json"
+    test_data_path = "/kaggle/input/vietnamese-legal-dataset-finetuning-test/test.json"
     
     if os.path.exists(model_path) and os.path.exists(test_data_path):
         print("\nRunning evaluation...")
