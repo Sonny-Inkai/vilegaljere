@@ -35,7 +35,7 @@ if finetune:
     
     # ✅ FIXED: Siêu tham số cho fine-tuning tối ưu cho T4x2
     learning_rate = 5e-5 # T5 fine-tuning standard (thấp hơn cho stability)
-    max_iters = 15000     # Giảm để fit trong Kaggle time limit
+    max_iters = 1000     # Giảm để fit trong Kaggle time limit
     batch_size = 32      # ✅ FIXED: Giảm cho T4 memory (16GB VRAM)
     gradient_accumulation_steps = 2  # ✅ FIXED: Tăng để maintain effective batch size
     weight_decay = 0.001  # ✅ FIXED: Standard weight decay cho T5
