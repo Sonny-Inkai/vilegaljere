@@ -50,7 +50,7 @@ else:
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
     # ✅ FIXED: Siêu tham số cho pre-training tối ưu cho T4x2
-    learning_rate = 2e-4  # ✅ FIXED: Standard for T5-small pre-training
+    learning_rate = 3e-4  # ✅ FIXED: Standard for T5-small pre-training
     max_iters = 10000     # ✅ FIXED: Reasonable for T5-small
     batch_size = 32       # ✅ FIXED: Safe for T4 memory
     gradient_accumulation_steps = 4   # ✅ FIXED: Maintain large effective batch
