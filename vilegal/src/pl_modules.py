@@ -5,11 +5,10 @@ import numpy as np
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from transformers.optimization import (
     Adafactor,
-    AdamW,
     get_linear_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
-    get_constant_schedule_with_warmup,
 )
+from torch.optim import AdamW
 from torch.nn.utils.rnn import pad_sequence
 from utils import shift_tokens_left, extract_vilegal_triplets
 
