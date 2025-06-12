@@ -1,19 +1,39 @@
-import torch
+from typing import Any
 import json
 import pytorch_lightning as pl
+import torch
 import numpy as np
+import pandas as pd
+from score import score, re_score
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from transformers.optimization import (
     Adafactor,
-    get_linear_schedule_with_warmup,
+    AdamW,
+    get_constant_schedule,
+    get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
+    get_cosine_with_hard_restarts_schedule_with_warmup,
+    get_linear_schedule_with_warmup,
+    get_polynomial_decay_schedule_with_warmup
 )
-from torch.optim import AdamW
+from scheduler import get_inverse_square_root_schedule_with_warmup
 from torch.nn.utils.rnn import pad_sequence
-from utils import shift_tokens_left, extract_vilegal_triplets
+from utils import BartTripletHead, shift_tokens_left, extract_vietnamese_legal_triplets
 
-class ViLegalJEREModule(pl.LightningModule):
-    def __init__(self, conf, config: AutoConfig, tokenizer: AutoTokenizer, model: AutoModelForSeq2SeqLM, *args, **kwargs):
+arg_to_scheduler = {
+    "linear": get_linear_schedule_with_warmup,
+    "cosine": get_cosine_schedule_with_warmup,
+    "cosine_w_restarts": get_cosine_with_hard_restarts_schedule_with_warmup,
+    "polynomial": get_polynomial_decay_schedule_with_warmup,
+    "constant": get_constant_schedule,
+    "constant_w_warmup": get_constant_schedule_with_warmup,
+    "inverse_square_root": get_inverse_square_root_schedule_with_warmup
+}
+
+
+class VietnameseLegalPLModule(pl.LightningModule):
+
+    def __init__(self, conf, config: AutoConfig, tokenizer: AutoTokenizer, model: AutoModelForSeq2SeqLM, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.save_hyperparameters(conf)
         self.tokenizer = tokenizer
@@ -26,178 +46,244 @@ class ViLegalJEREModule(pl.LightningModule):
         if self.hparams.label_smoothing == 0:
             self.loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
         else:
+            # dynamically import label_smoothed_nll_loss
             from utils import label_smoothed_nll_loss
             self.loss_fn = label_smoothed_nll_loss
 
-    def forward(self, inputs, labels, **kwargs):
+    def forward(self, inputs, labels, **kwargs) -> dict:
+        """
+        Method for the forward pass.
+        'training_step', 'validation_step' and 'test_step' should call
+        this method in order to compute the output predictions and the loss.
+        """
         if self.hparams.label_smoothing == 0:
-            if self.hparams.ignore_pad_token_for_loss:
-                outputs = self.model(**inputs, use_cache=False, return_dict=True)
+            if self.hparams is not None and self.hparams.ignore_pad_token_for_loss:
+                # force training to ignore pad token
+                outputs = self.model(**inputs, use_cache=False, return_dict=True, output_hidden_states=True)
                 logits = outputs['logits']
                 loss = self.loss_fn(logits.view(-1, logits.shape[-1]), labels.view(-1))
             else:
-                outputs = self.model(**inputs, labels=labels, use_cache=False, return_dict=True)
+                # compute usual loss via models
+                outputs = self.model(**inputs, labels=labels, use_cache=False, return_dict=True, output_hidden_states=True)
                 loss = outputs['loss']
                 logits = outputs['logits']
         else:
-            outputs = self.model(**inputs, use_cache=False, return_dict=True)
+            # compute label smoothed loss
+            outputs = self.model(**inputs, use_cache=False, return_dict=True, output_hidden_states=True)
             logits = outputs['logits']
             lprobs = torch.nn.functional.log_softmax(logits, dim=-1)
             labels.masked_fill_(labels == -100, self.config.pad_token_id)
             loss, _ = self.loss_fn(lprobs, labels, self.hparams.label_smoothing, ignore_index=self.config.pad_token_id)
-            
-        return {'loss': loss, 'logits': logits}
+        
+        output_dict = {'loss': loss, 'logits': logits}
+        return output_dict
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         labels = batch.pop("labels")
         labels_original = labels.clone()
         batch["decoder_input_ids"] = torch.where(labels != -100, labels, self.config.pad_token_id)
         labels = shift_tokens_left(labels, -100)
-        
         forward_output = self.forward(batch, labels)
-        self.log('train_loss', forward_output['loss'])
+        self.log('loss', forward_output['loss'])
         batch["labels"] = labels_original
         return forward_output['loss']
 
-    def validation_step(self, batch, batch_idx):
+    def _pad_tensors_to_max_len(self, tensor, max_length):
+        # If PAD token is not defined at least EOS token has to be defined
+        pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else self.config.eos_token_id
+
+        if pad_token_id is None:
+            raise ValueError(
+                f"Make sure that either `config.pad_token_id` or `config.eos_token_id` is defined if tensor has to be padded to `max_length`={max_length}"
+            )
+
+        padded_tensor = pad_token_id * torch.ones(
+            (tensor.shape[0], max_length), dtype=tensor.dtype, device=tensor.device
+        )
+        padded_tensor[:, : tensor.shape[-1]] = tensor
+        return padded_tensor
+
+    def generate_triples(self, batch, labels) -> None:
+        """Generate triplets for Vietnamese legal documents"""
+        
+        gen_kwargs = {
+            "max_length": self.hparams.val_max_target_length
+            if self.hparams.val_max_target_length is not None
+            else self.config.max_length,
+            "early_stopping": False,
+            "length_penalty": 0,
+            "no_repeat_ngram_size": 0,
+            "num_beams": self.hparams.eval_beams if self.hparams.eval_beams is not None else self.config.num_beams,
+        }
+
+        generated_tokens = self.model.generate(
+            batch["input_ids"].to(self.model.device),
+            attention_mask=batch["attention_mask"].to(self.model.device),
+            use_cache=True,
+            **gen_kwargs,
+        )
+
+        decoded_preds = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=False)
+        decoded_labels = self.tokenizer.batch_decode(
+            torch.where(labels != -100, labels, self.config.pad_token_id), 
+            skip_special_tokens=False
+        )
+        
+        # Use Vietnamese legal triplet extraction
+        return (
+            [extract_vietnamese_legal_triplets(rel) for rel in decoded_preds], 
+            [extract_vietnamese_legal_triplets(rel) for rel in decoded_labels]
+        )
+
+    def validation_step(self, batch: dict, batch_idx: int) -> None:
         labels = batch.pop("labels")
         labels_original = labels.clone()
         batch["decoder_input_ids"] = torch.where(labels != -100, labels, self.config.pad_token_id)
         labels = shift_tokens_left(labels, -100)
-        
         forward_output = self.forward(batch, labels)
-        self.log('val_loss', forward_output['loss'])
-        
-        # Generate predictions for evaluation
-        gen_kwargs = {
-            "max_length": self.hparams.val_max_target_length or 512,
-            "early_stopping": False,
-            "length_penalty": 0,
-            "num_beams": self.hparams.eval_beams or 3,
-        }
-        
-        generated_tokens = self.model.generate(
-            batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            use_cache=True,
-            **gen_kwargs,
-        )
-        
-        decoded_preds = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=False)
-        decoded_labels = self.tokenizer.batch_decode(torch.where(labels_original != -100, labels_original, self.config.pad_token_id), skip_special_tokens=False)
-        
-        # Extract triplets for evaluation
-        pred_triplets = [extract_vilegal_triplets(rel) for rel in decoded_preds]
-        gold_triplets = [extract_vilegal_triplets(rel) for rel in decoded_labels]
         
         batch["labels"] = labels_original
-        return {
-            'val_loss': forward_output['loss'],
-            'pred_triplets': pred_triplets,
-            'gold_triplets': gold_triplets,
-            'decoded_preds': decoded_preds,
-            'decoded_labels': decoded_labels
-        }
-
-    def test_step(self, batch, batch_idx):
-        return self.validation_step(batch, batch_idx)
-
-    def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        self.log('val_loss_epoch', avg_loss)
         
-        # Compute metrics
-        all_pred_triplets = []
-        all_gold_triplets = []
-        for output in outputs:
-            all_pred_triplets.extend(output['pred_triplets'])
-            all_gold_triplets.extend(output['gold_triplets'])
+        loss = forward_output['loss']
+        generated_triples, actual_triples = self.generate_triples(batch, batch["labels"])
         
-        metrics = self.compute_metrics(all_pred_triplets, all_gold_triplets)
-        for key, value in metrics.items():
-            self.log(f'val_{key}', value)
-
-    def test_epoch_end(self, outputs):
-        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        self.log('test_loss', avg_loss)
-        
-        # Compute metrics
-        all_pred_triplets = []
-        all_gold_triplets = []
-        for output in outputs:
-            all_pred_triplets.extend(output['pred_triplets'])
-            all_gold_triplets.extend(output['gold_triplets'])
-        
-        metrics = self.compute_metrics(all_pred_triplets, all_gold_triplets)
-        for key, value in metrics.items():
-            self.log(f'test_{key}', value)
+        try:
+            scores = []
+            for generated, actual in zip(generated_triples, actual_triples):
+                score_dict = score(generated, actual, mode='boundaries')
+                scores.append(score_dict)
             
-        print(f"\n=== TEST RESULTS ===")
-        for key, value in metrics.items():
-            print(f"{key}: {value:.4f}")
+            # Aggregate scores
+            if scores:
+                avg_precision = np.mean([s.get('micro', {}).get('p', 0) for s in scores])
+                avg_recall = np.mean([s.get('micro', {}).get('r', 0) for s in scores])
+                avg_f1 = np.mean([s.get('micro', {}).get('f1', 0) for s in scores])
+            else:
+                avg_precision = avg_recall = avg_f1 = 0.0
+                
+        except Exception as e:
+            print(f"Error computing scores: {e}")
+            avg_precision = avg_recall = avg_f1 = 0.0
 
-    def compute_metrics(self, pred_triplets, gold_triplets):
-        """Compute Precision, Recall, F1 for triplets"""
-        total_pred = sum(len(triplets) for triplets in pred_triplets)
-        total_gold = sum(len(triplets) for triplets in gold_triplets)
-        total_correct = 0
-        
-        for pred_list, gold_list in zip(pred_triplets, gold_triplets):
-            pred_set = set(pred_list)
-            gold_set = set(gold_list)
-            total_correct += len(pred_set.intersection(gold_set))
-        
-        precision = total_correct / total_pred if total_pred > 0 else 0.0
-        recall = total_correct / total_gold if total_gold > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        
+        self.log('val_loss', loss)
+        self.log('val_precision', avg_precision)
+        self.log('val_recall', avg_recall)
+        self.log('val_f1', avg_f1)
+
         return {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'total_pred': total_pred,
-            'total_gold': total_gold,
-            'total_correct': total_correct
+            'val_loss': loss,
+            'predictions': generated_triples,
+            'labels': actual_triples,
+            'val_precision': avg_precision,
+            'val_recall': avg_recall,
+            'val_f1': avg_f1
         }
+
+    def test_step(self, batch: dict, batch_idx: int) -> None:
+        labels = batch.pop("labels")
+        labels_original = labels.clone()
+        batch["decoder_input_ids"] = torch.where(labels != -100, labels, self.config.pad_token_id)
+        labels = shift_tokens_left(labels, -100)
+        forward_output = self.forward(batch, labels)
+        
+        batch["labels"] = labels_original
+        
+        loss = forward_output['loss']
+        generated_triples, actual_triples = self.generate_triples(batch, batch["labels"])
+        
+        try:
+            scores = []
+            for generated, actual in zip(generated_triples, actual_triples):
+                score_dict = score(generated, actual, mode='boundaries')
+                scores.append(score_dict)
+            
+            # Aggregate scores
+            if scores:
+                avg_precision = np.mean([s.get('micro', {}).get('p', 0) for s in scores])
+                avg_recall = np.mean([s.get('micro', {}).get('r', 0) for s in scores])
+                avg_f1 = np.mean([s.get('micro', {}).get('f1', 0) for s in scores])
+            else:
+                avg_precision = avg_recall = avg_f1 = 0.0
+                
+        except Exception as e:
+            print(f"Error computing scores: {e}")
+            avg_precision = avg_recall = avg_f1 = 0.0
+
+        self.log('test_loss', loss)
+        self.log('test_precision', avg_precision)
+        self.log('test_recall', avg_recall)
+        self.log('test_f1', avg_f1)
+
+        return {
+            'test_loss': loss,
+            'predictions': generated_triples,
+            'labels': actual_triples,
+            'test_precision': avg_precision,
+            'test_recall': avg_recall,
+            'test_f1': avg_f1
+        }
+
+    def validation_epoch_end(self, outputs) -> Any:
+        if outputs:
+            avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+            avg_precision = np.mean([x['val_precision'] for x in outputs])
+            avg_recall = np.mean([x['val_recall'] for x in outputs])
+            avg_f1 = np.mean([x['val_f1'] for x in outputs])
+            
+            self.log('val_loss_epoch', avg_loss)
+            self.log('val_precision_epoch', avg_precision)
+            self.log('val_recall_epoch', avg_recall)
+            self.log('val_f1_epoch', avg_f1)
+
+    def test_epoch_end(self, outputs) -> Any:
+        if outputs:
+            avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
+            avg_precision = np.mean([x['test_precision'] for x in outputs])
+            avg_recall = np.mean([x['test_recall'] for x in outputs])
+            avg_f1 = np.mean([x['test_f1'] for x in outputs])
+            
+            self.log('test_loss_epoch', avg_loss)
+            self.log('test_precision_epoch', avg_precision)
+            self.log('test_recall_epoch', avg_recall)
+            self.log('test_f1_epoch', avg_f1)
 
     def configure_optimizers(self):
+        """Prepare optimizer and schedule (linear warmup and decay)"""
+        model = self.model
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
                 "weight_decay": self.hparams.weight_decay,
             },
             {
-                "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
                 "weight_decay": 0.0,
             },
         ]
-        
-        if self.hparams.optimizer == "adafactor":
+        if self.hparams.adafactor:
             optimizer = Adafactor(
-                optimizer_grouped_parameters, 
-                lr=self.hparams.learning_rate,
-                scale_parameter=False,
-                relative_step=False
+                optimizer_grouped_parameters, lr=self.hparams.learning_rate, scale_parameter=False, relative_step=False
             )
         else:
-            optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
-            
-        if self.hparams.lr_scheduler == "linear":
-            scheduler = get_linear_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=self.hparams.warmup_steps,
-                num_training_steps=self.trainer.estimated_stepping_batches,
+            optimizer = AdamW(
+                optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
             )
-            scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
-            return [optimizer], [scheduler]
-        elif self.hparams.lr_scheduler == "cosine":
-            scheduler = get_cosine_schedule_with_warmup(
-                optimizer,
-                num_warmup_steps=self.hparams.warmup_steps,
-                num_training_steps=self.trainer.estimated_stepping_batches,
-            )
-            scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
-            return [optimizer], [scheduler]
+        self.opt = optimizer
+
+        scheduler = self._get_lr_scheduler(self.hparams.max_steps, optimizer)
+        return [optimizer], [{"scheduler": scheduler, "interval": "step", "frequency": 1}]
+
+    def _get_lr_scheduler(self, num_training_steps, optimizer):
+        schedule_func = arg_to_scheduler[self.hparams.lr_scheduler]
+        if self.hparams.lr_scheduler == "constant":
+            scheduler = schedule_func(optimizer)
+        elif self.hparams.lr_scheduler == "constant_w_warmup":
+            scheduler = schedule_func(optimizer, num_warmup_steps=self.hparams.warmup_steps)
+        elif self.hparams.lr_scheduler == "inverse_square_root":
+            scheduler = schedule_func(optimizer, num_warmup_steps=self.hparams.warmup_steps)
         else:
-            return optimizer 
+            scheduler = schedule_func(
+                optimizer, num_warmup_steps=self.hparams.warmup_steps, num_training_steps=num_training_steps
+            )
+        return scheduler 
