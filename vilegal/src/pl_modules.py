@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 from score import score, re_score
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
+from torch.optim import AdamW
 from transformers.optimization import (
     Adafactor,
-    AdamW,
+    
     get_constant_schedule,
     get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
