@@ -1,0 +1,24 @@
+# @package _global_
+
+# Data paths for Kaggle
+train_file: "/kaggle/input/vietnamese-legal-dataset-finetuning/finetune.json"
+validation_file: "/kaggle/input/vietnamese-legal-dataset-finetuning-test/test.json"
+test_file: "/kaggle/input/vietnamese-legal-dataset-finetuning-test/test.json"
+
+# Output directory on Kaggle
+out_dir: "/kaggle/working/vietnamese-legal-vit5"
+
+# P100-safe processing settings
+max_source_length: 512  
+max_target_length: 512
+val_max_target_length: 512
+pad_to_max_length: True
+ignore_pad_token_for_loss: True
+
+# Data loading
+preprocessing_num_workers: 2
+overwrite_cache: False
+max_train_samples: null
+max_val_samples: null
+max_test_samples: null
+source_prefix: "trích xuất quan hệ: " 

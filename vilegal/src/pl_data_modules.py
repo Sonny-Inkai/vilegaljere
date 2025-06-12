@@ -49,7 +49,19 @@ class VietnameseLegalDataset(Dataset):
         input_text = self.prefix + example['input_text']
         target_text = example['target_text']
         
-        # Tokenize input
+        # Tokenize target using the new API
+        labels = self.tokenizer(
+            text_target=target_text,
+            max_length=self.max_target_length,
+            padding=self.padding,
+            truncation=True,
+            return_tensors="pt"
+        )['input_ids']
+        
+        # Handle padding for loss computation
+        if self.padding == "max_length":
+            labels[labels == self.tokenizer.pad_token_id] = -100
+        
         model_inputs = self.tokenizer(
             input_text,
             max_length=self.max_source_length,
@@ -57,28 +69,11 @@ class VietnameseLegalDataset(Dataset):
             truncation=True,
             return_tensors="pt"
         )
-        
-        # Tokenize target
-        with self.tokenizer.as_target_tokenizer():
-            labels = self.tokenizer(
-                target_text,
-                max_length=self.max_target_length,
-                padding=self.padding,
-                truncation=True,
-                return_tensors="pt"
-            )
-        
-        # Handle padding for loss computation
-        if self.padding == "max_length":
-            labels["input_ids"] = [
-                [(l if l != self.tokenizer.pad_token_id else -100) for l in label] 
-                for label in labels["input_ids"]
-            ]
-        
+
         return {
-            'input_ids': model_inputs['input_ids'].squeeze(),
-            'attention_mask': model_inputs['attention_mask'].squeeze(),
-            'labels': torch.tensor(labels['input_ids']).squeeze()
+            'input_ids': model_inputs['input_ids'].squeeze(0),
+            'attention_mask': model_inputs['attention_mask'].squeeze(0),
+            'labels': labels.squeeze(0)
         }
 
 

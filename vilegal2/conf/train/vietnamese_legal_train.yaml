@@ -1,0 +1,33 @@
+# @package _global_
+
+# P100 GPU Optimization
+# Effective batch size = train_batch_size * gradient_acc_steps = 4 * 8 = 32
+train_batch_size: 32
+eval_batch_size: 32
+gradient_acc_steps: 2
+gradient_clip_value: 1.0
+max_steps: 10000
+
+# Evaluation and Persistence
+apply_early_stopping: True
+val_check_interval: 0.1
+monitor_var: 'val_f1'
+monitor_var_mode: 'max'
+patience: 10
+save_top_k: 3
+
+# Core Training
+gpus: 1
+precision: "16-mixed"
+learning_rate: 5e-5
+weight_decay: 0.0
+adam_epsilon: 1e-8
+lr_scheduler: "linear"
+warmup_steps: 0
+
+# Reproducibility
+seed: 42
+
+# Dataloader
+dataloader_num_workers: 2
+dataloader_pin_memory: True 

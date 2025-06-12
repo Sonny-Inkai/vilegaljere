@@ -1,0 +1,5 @@
+defaults:
+  - train: vietnamese_legal_train
+  - model: vit5_model
+  - data: vietnamese_legal_data
+  - _self_ 

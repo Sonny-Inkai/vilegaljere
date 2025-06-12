@@ -166,10 +166,24 @@ class VietnameseLegalPLModule(pl.LightningModule):
             print(f"Error computing scores: {e}")
             avg_precision = avg_recall = avg_f1 = 0.0
 
-        self.log('val_loss', loss)
-        self.log('val_precision', avg_precision)
-        self.log('val_recall', avg_recall)
-        self.log('val_f1', avg_f1)
+        # Add extensive logging for diagnostics
+        self.log('val_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_precision', avg_precision, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_recall', avg_recall, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log('val_f1', avg_f1, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        # Print a sample of generated text for debugging on the first batch of every validation epoch
+        if batch_idx == 0 and self.trainer.is_global_zero:
+            print("\n\n" + "="*80)
+            print("VALIDATION SAMPLES (EPOCH " + str(self.current_epoch) + ")")
+            print("="*80)
+            for i in range(min(2, len(decoded_preds))):
+                print(f"SAMPLE {i+1}")
+                print(f"  - PRED: {decoded_preds[i]}")
+                print(f"  - GOLD: {decoded_labels[i]}")
+                print(f"  - EXTRACTED: {generated_triples[i]}")
+                print(f"  - ACTUAL:    {actual_triples[i]}")
+                print("-"*80)
 
         return {
             'val_loss': loss,
@@ -210,10 +224,10 @@ class VietnameseLegalPLModule(pl.LightningModule):
             print(f"Error computing scores: {e}")
             avg_precision = avg_recall = avg_f1 = 0.0
 
-        self.log('test_loss', loss)
-        self.log('test_precision', avg_precision)
-        self.log('test_recall', avg_recall)
-        self.log('test_f1', avg_f1)
+        self.log('test_loss', loss, on_epoch=True, sync_dist=True)
+        self.log('test_precision', avg_precision, on_epoch=True, sync_dist=True)
+        self.log('test_recall', avg_recall, on_epoch=True, sync_dist=True)
+        self.log('test_f1', avg_f1, on_epoch=True, sync_dist=True)
 
         return {
             'test_loss': loss,
@@ -225,11 +239,9 @@ class VietnameseLegalPLModule(pl.LightningModule):
         }
 
     def on_validation_epoch_end(self):
-        # PyTorch Lightning v2.0+ hook
         pass
 
     def on_test_epoch_end(self):
-        # PyTorch Lightning v2.0+ hook
         pass
 
     def configure_optimizers(self):
