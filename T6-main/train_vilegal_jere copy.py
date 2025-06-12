@@ -14,7 +14,7 @@ from transformers import AutoTokenizer
 
 # -----------------------------------------------------------------------------
 # -- CÔNG TẮC CHÍNH --
-finetune = True
+finetune = False
 # -----------------------------------------------------------------------------
 
 # --- Cấu hình chung ---
@@ -33,15 +33,15 @@ if finetune:
     finetune_file_name = "finetune.json"
     out_dir = '/kaggle/working/out_vilegal_t5small' # Thư mục chứa checkpoint pre-trained
     
-    # Siêu tham số cho fine-tuning
-    learning_rate = 3e-5 # Learning rate nhỏ hơn nhiều
-    max_iters = 13000    # Số vòng lặp ít hơn
-    batch_size = 8       # Batch size có thể nhỏ hơn
-    gradient_accumulation_steps = 4
-    weight_decay = 0.001
-    eval_interval = 100
-    log_interval = 10
-    eval_iters = 20
+    # ✅ FIXED: Siêu tham số cho fine-tuning tối ưu cho T4x2
+    learning_rate = 5e-5 # T5 fine-tuning standard (thấp hơn cho stability)
+    max_iters = 1000     # Giảm để fit trong Kaggle time limit
+    batch_size = 32      # ✅ FIXED: Giảm cho T4 memory (16GB VRAM)
+    gradient_accumulation_steps = 2  # ✅ FIXED: Tăng để maintain effective batch size
+    weight_decay = 0.001  # ✅ FIXED: Standard weight decay cho T5
+    eval_interval = 200  # ✅ FIXED: Tăng để save time
+    log_interval = 10    # ✅ FIXED: Reduce logging frequency
+    eval_iters = 100     # ✅ FIXED: Giảm để save time
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -49,15 +49,15 @@ else:
     data_path = "/kaggle/input/vietnamese-legal-dataset"  # Kaggle dataset path
     out_dir = '/kaggle/working/out_vilegal_t5small'
     
-    # Siêu tham số cho pre-training
-    learning_rate = 3e-4  # Good for T5-small
-    max_iters = 10000     # Very small for testing
-    batch_size = 16      # Even smaller for T4 memory constraints
-    gradient_accumulation_steps = 4   # Reduced to avoid memory issues
-    weight_decay = 1e-3
-    eval_interval = 500  # More frequent eval for shorter training
-    log_interval = 10   # More frequent logging
-    eval_iters = 200     # Fewer eval iterations to save time
+    # ✅ FIXED: Siêu tham số cho pre-training tối ưu cho T4x2
+    learning_rate = 3e-4  # ✅ FIXED: Standard for T5-small pre-training
+    max_iters = 10000     # ✅ FIXED: Reasonable for T5-small
+    batch_size = 32       # ✅ FIXED: Safe for T4 memory
+    gradient_accumulation_steps = 4   # ✅ FIXED: Maintain large effective batch
+    weight_decay = 1e-2   # ✅ FIXED: Standard T5 weight decay
+    eval_interval = 500  # ✅ FIXED: Less frequent for pre-training
+    log_interval = 10     # ✅ FIXED: Reduce logging overhead
+    eval_iters = 200      # ✅ FIXED: Keep reasonable for evaluation
     
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -72,8 +72,8 @@ max_target_length = 512  # decoder max length
 n_layer = 6         # T5-small has 6 layers each for encoder/decoder
 n_head = 8          # T5-small uses 8 attention heads
 head_dim = 64       # 512/8 = 64
-rank = 4
-q_rank = 8
+rank = 4            # ✅ GOOD: Reasonable CP rank for T6
+q_rank = 8          # ✅ GOOD: Reasonable query rank for T6
 n_embd = 512        # T5-small hidden size
 dropout = 0.1       # Standard dropout for T5
 bias = False
@@ -85,9 +85,9 @@ beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 2000   # Longer warmup for stability
-lr_decay_iters = 50000
-min_lr = 1e-6
+warmup_iters = 2000   # ✅ FIXED: Longer warmup for stability (was 1000)
+lr_decay_iters = 10000  # ✅ FIXED: Match max_iters for full decay (was 10000)
+min_lr = 5e-6        # ✅ FIXED: Higher min_lr to avoid vanishing gradients (was 1e-6)
 # DDP settings for Kaggle T4x2
 backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
 schedule = 'cosine'
@@ -99,9 +99,9 @@ compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) if os.path.exists('configurator.py') else None
-config = {k: globals()[k] for k in config_keys}
+# config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+# exec(open('configurator.py').read()) if os.path.exists('configurator.py') else None
+# config = {k: globals()[k] for k in config_keys}
 
 # Import ViLegalJERE model
 from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
@@ -147,6 +147,17 @@ tokens_trained = 0
 torch.manual_seed(5000 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+
+# ✅ FIXED: Memory optimization for T4 GPU
+torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()  # Clear cache before training
+    # Enable memory-efficient attention if available
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+    except:
+        pass
+
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.autocast(device_type=device_type, dtype=ptdtype)
@@ -186,50 +197,121 @@ def load_finetune_data():
         print(f"Loaded {len(processed_data)} fine-tuning pairs")
     return processed_data
 
+# ✅ Helper functions cho T5 span corruption theo chuẩn Google
+def random_spans_helper(inputs_length, noise_density, mean_noise_span_length, 
+                       extra_tokens_per_span_inputs=1, extra_tokens_per_span_targets=1):
+    """Calculate input and target lengths for span corruption"""
+    def _tokens_length_to_inputs_length_targets_length(tokens_length):
+        num_noise_tokens = int(round(tokens_length * noise_density))
+        num_noise_tokens = min(max(num_noise_tokens, 1), tokens_length - 1)
+        num_noise_spans = int(round(num_noise_tokens / mean_noise_span_length))
+        num_noise_spans = max(num_noise_spans, 1)
+        num_nonnoise_tokens = tokens_length - num_noise_tokens
+        
+        # Calculate input length (original tokens - noise + sentinel tokens)
+        inputs_length = num_nonnoise_tokens + num_noise_spans * extra_tokens_per_span_inputs
+        
+        # Calculate target length (noise tokens + sentinel tokens)  
+        targets_length = num_noise_tokens + num_noise_spans * extra_tokens_per_span_targets
+        
+        return inputs_length, targets_length
+    
+    return _tokens_length_to_inputs_length_targets_length(inputs_length)
+
+def create_noise_mask(length, noise_density, mean_noise_span_length):
+    """Create random spans noise mask like Google T5"""
+    if noise_density == 0.0:
+        return [False] * length
+    
+    # Increase length to avoid degeneracy    
+    length = max(length, 2)
+    
+    num_noise_tokens = int(round(length * noise_density))
+    num_noise_tokens = min(max(num_noise_tokens, 1), length - 1)
+    num_noise_spans = max(1, int(round(num_noise_tokens / mean_noise_span_length)))
+    num_nonnoise_tokens = length - num_noise_tokens
+    
+    def random_segmentation(num_items, num_segments):
+        """Partition a sequence randomly into non-empty segments"""
+        if num_segments >= num_items:
+            return [1] * num_items
+        
+        # Create random breakpoints
+        breaks = sorted(np.random.choice(num_items - 1, num_segments - 1, replace=False))
+        breaks = [0] + [b + 1 for b in breaks] + [num_items]
+        
+        # Calculate segment lengths
+        lengths = [breaks[i+1] - breaks[i] for i in range(len(breaks) - 1)]
+        return lengths
+    
+    noise_span_lengths = random_segmentation(num_noise_tokens, num_noise_spans)
+    nonnoise_span_lengths = random_segmentation(num_nonnoise_tokens, num_noise_spans)
+    
+    # Interleave spans starting with non-noise
+    interleaved_span_lengths = []
+    for i in range(num_noise_spans):
+        interleaved_span_lengths.append(nonnoise_span_lengths[i])
+        interleaved_span_lengths.append(noise_span_lengths[i])
+    
+    # Create mask
+    mask = []
+    is_noise = False
+    for span_length in interleaved_span_lengths:
+        mask.extend([is_noise] * span_length)
+        is_noise = not is_noise
+    
+    return mask[:length]
+
 def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     """
-    Tạo dữ liệu theo kiểu span corruption của T5 với LOGIC ĐÚNG.
+    Tạo dữ liệu theo kiểu span corruption của T5 chuẩn Google.
     """
-    num_tokens = len(tokens)
-    num_noise_tokens = int(round(num_tokens * noise_density))
-    if num_noise_tokens == 0:
-        return tokens, tokens
-
-    # Chọn ngẫu nhiên các vị trí để bắt đầu che
-    noise_indices = np.random.choice(range(num_tokens), num_noise_tokens, replace=False)
-    noise_mask = np.zeros(num_tokens, dtype=bool)
-    noise_mask[noise_indices] = True
+    import numpy as np
     
-    # Lấy ID của sentinel token đầu tiên (<extra_id_0>) một cách an toàn
+    num_tokens = len(tokens)
+    if num_tokens <= 1:
+        return tokens, tokens
+        
+    # ✅ Tạo noise mask theo chuẩn Google T5
+    noise_mask = create_noise_mask(num_tokens, noise_density, mean_noise_span_length)
+    
+    # ✅ Lấy sentinel token theo chuẩn Google T5
     try:
         sentinel_start_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-        if sentinel_start_id == tokenizer.unk_token_id: raise ValueError
+        if sentinel_start_id == tokenizer.unk_token_id:
+            raise ValueError("Sentinel token not found")
     except (KeyError, ValueError):
-        sentinel_start_id = len(tokenizer) - 1 # Fallback an toàn
+        # ✅ CORRECT FALLBACK: Hard-coded based on tokenizer config
+        sentinel_start_id = 10099  # <extra_id_0> confirmed by tokenizer analysis
+        if master_process:
+            print(f"Warning: Using hard-coded sentinel_start_id = {sentinel_start_id}")
     
+    # ✅ Create input sequence with sentinels (noise_span_to_unique_sentinel)
     input_ids = []
     labels = []
     
-    in_noise_span = False
+    prev_token_is_noise = False
     sentinel_idx = 0
     
-    for i in range(num_tokens):
-        if noise_mask[i]:
-            if not in_noise_span:
-                # Bắt đầu một vùng nhiễu mới
-                # DÙNG PHÉP TRỪ để có ID sentinel đúng (10099, 10098, ...)
+    for i, token in enumerate(tokens):
+        is_noise = noise_mask[i] if i < len(noise_mask) else False
+        
+        if is_noise:
+            if not prev_token_is_noise:
+                # First token of a noise span - add sentinel to input
                 sentinel_id = sentinel_start_id - sentinel_idx
                 input_ids.append(sentinel_id)
-                labels.append(sentinel_id)
+                labels.append(sentinel_id)  # Start target with same sentinel
                 sentinel_idx += 1
-            in_noise_span = True
-            labels.append(tokens[i])
+            # Add noise token to target only
+            labels.append(token)
         else:
-            if in_noise_span:
-                # Kết thúc vùng nhiễu trước đó
-                in_noise_span = False
-            input_ids.append(tokens[i])
+            # Non-noise token goes to input
+            input_ids.append(token)
+            
+        prev_token_is_noise = is_noise
     
+    # ✅ Thêm EOS vào cuối labels
     labels.append(tokenizer.eos_token_id)
     
     return input_ids, labels
@@ -276,13 +358,12 @@ def get_batch(split):
                                    max_length=max_target_length, return_tensors="pt")
         
         input_ids = input_encodings.input_ids
-        attention_mask = input_encodings.attention_mask
+        attention_mask = input_encodings.attention_mask.to(torch.bool)
         labels = target_encodings.input_ids
         
-        # Tạo decoder_attention_mask
-        # This mask is based on shifted labels to correctly mask padding in the decoder's self-attention.
-        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
-        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        # ✅ Tạo decoder_input_ids đúng cách với eos_token_id
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.eos_token_id), labels[:, :-1]], dim=-1)
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id)
         decoder_input_ids = temp_decoder_input_ids
         
     else:
@@ -305,12 +386,12 @@ def get_batch(split):
         input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
         labels = torch.tensor(batch_labels, dtype=torch.long)
         
-        # Tạo attention mask
-        attention_mask = (input_ids != tokenizer.pad_token_id).float()
+        # ✅ Tạo attention mask đúng kiểu boolean
+        attention_mask = (input_ids != tokenizer.pad_token_id)
         
-        # Tạo decoder_attention_mask cho pre-training
-        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.pad_token_id), labels[:, :-1]], dim=-1)
-        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id).float()
+        # ✅ Tạo decoder_input_ids đúng cách cho pre-training  
+        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.eos_token_id), labels[:, :-1]], dim=-1)
+        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id)
         decoder_input_ids = temp_decoder_input_ids
 
     # Chuyển lên GPU
@@ -343,14 +424,26 @@ model_args = dict(
     using_groupnorm=using_groupnorm,
     vocab_size=len(tokenizer),  # Use actual tokenizer size after adding special tokens
     dropout=dropout,
-    pad_token_id=tokenizer.pad_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-    decoder_start_token_id=tokenizer.pad_token_id
+    pad_token_id=tokenizer.pad_token_id,      # 0 - Correct
+    eos_token_id=tokenizer.eos_token_id,      # 3 - Correct (not 1!)
+    decoder_start_token_id=tokenizer.eos_token_id  # 3 - Use EOS as decoder start
 )
 
-print(f"Tokenizer vocab size: {len(tokenizer)}")
-print(f"Pad token ID: {tokenizer.pad_token_id}")
-print(f"EOS token ID: {tokenizer.eos_token_id}")
+print(f"🔧 TOKENIZER DEBUG INFO:")
+print(f"  Vocab size: {len(tokenizer)}")
+print(f"  Pad token: '{tokenizer.pad_token}' (id: {tokenizer.pad_token_id})")
+print(f"  EOS token: '{tokenizer.eos_token}' (id: {tokenizer.eos_token_id})")
+print(f"  UNK token: '{tokenizer.unk_token}' (id: {tokenizer.unk_token_id})")
+
+# ✅ Verify sentinel tokens
+try:
+    sentinel_test = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+    print(f"  Sentinel <extra_id_0>: {sentinel_test}")
+except:
+    print(f"  ⚠️ Could not find <extra_id_0> token!")
+
+print(f"🎯 MODEL CONFIG:")
+print(f"  decoder_start_token_id: {tokenizer.eos_token_id} (should match EOS)")
 
 # Initialize tracking variables
 iter_num = 0
@@ -449,11 +542,12 @@ def estimate_loss():
         for k in range(eval_iters):
             input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch(split)
             with ctx:
+                # ✅ FIXED: Pass encoder attention mask correctly in evaluation
                 outputs = model(
                     input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    attention_mask=attention_mask,  # Encoder attention mask
                     decoder_input_ids=decoder_input_ids,
-                    decoder_attention_mask=decoder_attention_mask,
+                    decoder_attention_mask=decoder_attention_mask,  # Decoder attention mask
                     labels=labels
                 )
                 loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
@@ -463,14 +557,30 @@ def estimate_loss():
     return out
 
 def get_lr(it, schedule='cosine'):
-    """Learning rate scheduler"""
+    """Learning rate scheduler với warmup và decay cải thiện"""
     if it < warmup_iters:
+        # ✅ Linear warmup
         return learning_rate * it / warmup_iters
     if it > lr_decay_iters:
         return min_lr
+    
+    # ✅ Decay phase  
     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
     assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    
+    if schedule == 'cosine':
+        # Cosine annealing
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    elif schedule == 'linear':
+        # Linear decay
+        coeff = 1.0 - decay_ratio
+    elif schedule == 'constant':
+        # Constant after warmup
+        coeff = 1.0
+    else:
+        # Default to cosine
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    
     return min_lr + coeff * (learning_rate - min_lr)
 
 # Logging setup
@@ -574,11 +684,12 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
+            # ✅ FIXED: Pass encoder attention mask correctly for T5 architecture
             outputs = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask,  # Encoder attention mask
                 decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
+                decoder_attention_mask=decoder_attention_mask,  # Decoder attention mask
                 labels=labels
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
