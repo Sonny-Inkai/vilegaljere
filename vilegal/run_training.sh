@@ -50,7 +50,7 @@ echo "📂 Output directory: $OUTPUT_DIR"
 
 # Install dependencies if not already installed
 echo "📦 Installing dependencies..."
-pip install -q transformers pytorch-lightning datasets tokenizers numpy tqdm tensorboard scikit-learn pandas regex sentencepiece accelerate
+pip install -q torch transformers>=4.30.0 pytorch-lightning>=1.8.0 datasets tokenizers "numpy>=1.21.0,<2.0.0" tqdm tensorboard scikit-learn pandas regex sentencepiece accelerate>=0.15.0
 
 # Start training
 echo "🚀 Starting training..."
@@ -66,7 +66,7 @@ python train.py \
     --val_path "$VAL_PATH" \
     --output_dir "$OUTPUT_DIR" \
     --model_name "$MODEL_NAME" \
-    --batch_size 64 \
+    --batch_size 8 \
     --learning_rate 1e-4 \
     --num_epochs 10 \
     --warmup_steps 1000 \

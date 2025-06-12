@@ -19,9 +19,9 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from transformers import (
     AutoTokenizer, 
     AutoModelForSeq2SeqLM, 
-    AdamW,
     get_linear_schedule_with_warmup
 )
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 
