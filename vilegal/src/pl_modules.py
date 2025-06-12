@@ -60,17 +60,17 @@ class VietnameseLegalPLModule(pl.LightningModule):
         if self.hparams.label_smoothing == 0:
             if self.hparams is not None and self.hparams.ignore_pad_token_for_loss:
                 # force training to ignore pad token
-                outputs = self.model(**inputs, use_cache=False, return_dict=True, output_hidden_states=True)
+                outputs = self.model(**inputs, use_cache=False, return_dict=True)
                 logits = outputs['logits']
                 loss = self.loss_fn(logits.view(-1, logits.shape[-1]), labels.view(-1))
             else:
                 # compute usual loss via models
-                outputs = self.model(**inputs, labels=labels, use_cache=False, return_dict=True, output_hidden_states=True)
+                outputs = self.model(**inputs, labels=labels, use_cache=False, return_dict=True)
                 loss = outputs['loss']
                 logits = outputs['logits']
         else:
             # compute label smoothed loss
-            outputs = self.model(**inputs, use_cache=False, return_dict=True, output_hidden_states=True)
+            outputs = self.model(**inputs, use_cache=False, return_dict=True)
             logits = outputs['logits']
             lprobs = torch.nn.functional.log_softmax(logits, dim=-1)
             labels.masked_fill_(labels == -100, self.config.pad_token_id)

@@ -3,7 +3,7 @@
 # optimization
 train_batch_size: 32
 eval_batch_size: 32
-gradient_acc_steps: 4
+gradient_acc_steps: 2
 gradient_clip_value: 10.0
 max_steps: 10000
 

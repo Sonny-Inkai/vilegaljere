@@ -9,9 +9,9 @@ test_file: "/kaggle/input/vietnamese-legal-dataset-finetuning-test/test.json"
 out_dir: "/kaggle/working/vietnamese_legal_vit5"
 
 # Data processing
-max_source_length: 512
-max_target_length: 512
-val_max_target_length: 512
+max_source_length: 256
+max_target_length: 128
+val_max_target_length: 128
 pad_to_max_length: True
 ignore_pad_token_for_loss: True
 preprocessing_num_workers: 4
