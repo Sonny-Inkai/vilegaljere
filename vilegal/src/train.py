@@ -88,16 +88,15 @@ def train(conf: omegaconf.DictConfig) -> None:
     
     # Trainer
     trainer = pl.Trainer(
-        gpus=conf.gpus,
+        devices=conf.gpus if conf.gpus > 0 else "auto",
+        accelerator="gpu" if conf.gpus > 0 else "cpu",
         accumulate_grad_batches=conf.gradient_acc_steps,
         gradient_clip_val=conf.gradient_clip_value,
         val_check_interval=conf.val_check_interval,
         callbacks=callbacks_store,
         max_steps=conf.max_steps,
         precision=conf.precision,
-        amp_level=conf.amp_level,
         logger=wandb_logger,
-        resume_from_checkpoint=conf.checkpoint_path,
         limit_val_batches=conf.val_percent_check
     )
 
@@ -105,7 +104,7 @@ def train(conf: omegaconf.DictConfig) -> None:
     trainer.fit(pl_module, datamodule=pl_data_module)
 
 
-@hydra.main(config_path='../conf', config_name='root')
+@hydra.main(version_base=None, config_path='../conf', config_name='root')
 def main(conf: omegaconf.DictConfig):
     train(conf)
 

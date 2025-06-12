@@ -55,7 +55,8 @@ def test(conf: omegaconf.DictConfig) -> None:
 
     # Trainer for testing
     trainer = pl.Trainer(
-        gpus=conf.gpus if torch.cuda.is_available() else 0,
+        devices=1 if torch.cuda.is_available() else "auto",
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
         logger=False
     )
 
@@ -116,7 +117,7 @@ def predict_single(text: str, model_path: str):
     return triplets
 
 
-@hydra.main(config_path='../conf', config_name='root')
+@hydra.main(version_base=None, config_path='../conf', config_name='root')
 def main(conf: omegaconf.DictConfig):
     test(conf)
 
