@@ -75,7 +75,8 @@ def main():
     
     # Setup trainer for testing
     trainer = pl.Trainer(
-        gpus=args.gpus,
+        devices=args.gpus if args.gpus > 0 else "auto",
+        accelerator="gpu" if args.gpus > 0 else "cpu",
         logger=False,
         enable_progress_bar=True,
         enable_model_summary=False

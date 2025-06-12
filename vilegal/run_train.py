@@ -29,7 +29,7 @@ if __name__ == "__main__":
         "--eval_beams", "3",
         "--max_length", "512",
         "--max_target_length", "512",
-        "--precision", "16",
+        "--precision", "16-mixed",
         "--gpus", "1",
         "--seed", "42"
     ]

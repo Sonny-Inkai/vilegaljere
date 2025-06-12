@@ -51,7 +51,7 @@ def main():
     
     # Other arguments
     parser.add_argument("--seed", default=42, type=int)
-    parser.add_argument("--precision", default=16, type=int)
+    parser.add_argument("--precision", default="16-mixed", type=str)
     parser.add_argument("--gpus", default=1, type=int)
     parser.add_argument("--save_top_k", default=3, type=int)
     parser.add_argument("--patience", default=3, type=int)
@@ -131,7 +131,8 @@ def main():
     # Setup trainer
     trainer = pl.Trainer(
         max_epochs=args.num_epochs,
-        gpus=args.gpus,
+        devices=args.gpus if args.gpus > 0 else "auto",
+        accelerator="gpu" if args.gpus > 0 else "cpu",
         precision=args.precision,
         gradient_clip_val=1.0,
         accumulate_grad_batches=args.gradient_accumulation_steps,
