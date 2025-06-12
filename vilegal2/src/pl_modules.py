@@ -1,11 +1,12 @@
 import pytorch_lightning as pl
 from omegaconf import DictConfig
 import torch
+from torch.optim import AdamW
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
-    AdamW
+    
 )
 from utils import shift_tokens_left, extract_vietnamese_legal_triplets
 from score import score
