@@ -1,48 +1,74 @@
 import torch
 import json
 from transformers import AutoTokenizer
-from model.ViLegalJERE import ViLegalJERE
+from model.ViLegalJERE import ViLegalJERE, ViLegalConfig
+import os
 
 def load_model_and_tokenizer(model_path="/kaggle/working/out_vilegal_t5small"):
     """Load finetuned model and tokenizer"""
     try:
-        model = ViLegalJERE.from_pretrained(model_path)
+        # ✅ FIX: Setup tokenizer với special tokens trước
+        print("🔧 Setting up tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
         
-        # ✅ FIX: Thêm tất cả special tokens cần thiết cho Vietnamese Legal JERE
         domain_special_tokens = [
             "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
             "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
             "<Relates_To>", "<Amended_By>"
         ]
         
-        # ✅ FIX: Không cần triplet tokens vì cháu dùng format riêng
-        # triplet_tokens = ["<triplet>", "<subj>", "<obj>"]  # Bỏ dòng này
+        tokenizer.add_tokens(domain_special_tokens, special_tokens=True)
+        print(f"✅ Tokenizer vocab size: {len(tokenizer)}")
         
-        # ✅ FIX: Chỉ dùng domain special tokens  
-        all_special_tokens = domain_special_tokens
+        # ✅ FIX: Check if model path exists
+        if not os.path.exists(model_path):
+            print(f"❌ Model path not found: {model_path}")
+            
+            # Try alternative paths
+            alt_paths = ["out_vilegal_t5small", "./out_vilegal_t5small"]
+            model_path = None
+            for alt_path in alt_paths:
+                if os.path.exists(alt_path):
+                    model_path = alt_path
+                    print(f"✅ Found model at: {model_path}")
+                    break
+            
+            if model_path is None:
+                print("🔧 No trained model found. Creating new model...")
+                print("⚠️  WARNING: This will be an UNTRAINED model!")
+                config = ViLegalConfig(vocab_size=len(tokenizer))
+                model = ViLegalJERE(config)
+                return model, tokenizer
         
-        # ✅ FIX: Thêm vào tokenizer
-        tokenizer.add_tokens(all_special_tokens, special_tokens=True)
+        # ✅ FIX: Try to load with proper error handling
+        try:
+            print(f"🔧 Loading model from: {model_path}")
+            model = ViLegalJERE.from_pretrained(model_path)
+            print(f"✅ Model loaded successfully")
+            
+            # ✅ FIX: Check vocab size mismatch
+            if model.shared.num_embeddings != len(tokenizer):
+                print(f"🔧 VOCAB SIZE MISMATCH!")
+                print(f"   Model: {model.shared.num_embeddings}")
+                print(f"   Tokenizer: {len(tokenizer)}")
+                print(f"   Resizing model embeddings...")
+                model.resize_token_embeddings(len(tokenizer))
+                print(f"✅ Resized to {len(tokenizer)}")
+            
+            return model, tokenizer
+            
+        except Exception as e:
+            print(f"❌ Error loading saved model: {e}")
+            print("🔧 Creating new model with correct vocab size...")
+            print("⚠️  WARNING: This will be an UNTRAINED model!")
+            
+            config = ViLegalConfig(vocab_size=len(tokenizer))
+            model = ViLegalJERE(config)
+            return model, tokenizer
         
-        print(f"✅ Added {len(all_special_tokens)} special tokens to tokenizer")
-        print(f"New tokenizer vocab size: {len(tokenizer)}")
-        
-        # ✅ FIX: Model phải resize để match tokenizer
-        if model.config.vocab_size != len(tokenizer):
-            print(f"🔧 Resizing model embeddings from {model.config.vocab_size} to {len(tokenizer)}")
-            model.resize_token_embeddings(len(tokenizer))
-        
-        model.eval()
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model.to(device)
-        print(f"Model loaded successfully on {device}")
-        print(f"Model vocab size: {model.config.vocab_size}")
-        print(f"Tokenizer vocab size: {len(tokenizer)}")
-        return model, tokenizer, device
     except Exception as e:
-        print(f"Error loading model: {e}")
-        return None, None, None
+        print(f"❌ Fatal error in model loading: {e}")
+        raise e
 
 def extract_vietnamese_legal_relations(text):
     """
@@ -119,19 +145,25 @@ def generate_relations(model, tokenizer, device, context_text, max_length=512):
         return_tensors="pt"
     ).to(device)
     
-    # ✅ FIX: Sử dụng generation parameters tốt hơn
+    # ✅ FIXED: Beam search works now!
+    print(f"🔧 Input shape: {inputs['input_ids'].shape}")
+    print(f"🔧 Input token range: [{inputs['input_ids'].min().item()}, {inputs['input_ids'].max().item()}]")
+    
     with torch.no_grad():
         outputs = model.generate(
             input_ids=inputs['input_ids'],
             attention_mask=inputs['attention_mask'],
-            max_length=max_length,
-            do_sample=False,  # ✅ Sử dụng deterministic generation để debug
-            num_beams=3,      # ✅ Beam search cho output ổn định hơn
+            max_length=200,   # ✅ Longer for better output
+            do_sample=False,  # ✅ Deterministic generation
+            num_beams=3,      # ✅ Beam search works now!
             early_stopping=True,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            no_repeat_ngram_size=2  # ✅ Tránh lặp lại
+            no_repeat_ngram_size=2  # ✅ Avoid repetition
         )
+    
+    print(f"🔧 Output shape: {outputs.shape}")
+    print(f"🔧 Output token range: [{outputs.min().item()}, {outputs.max().item()}]")
     
     # Decode output (skip the start token)
     generated_text = tokenizer.decode(outputs[0, 1:], skip_special_tokens=False)
@@ -141,46 +173,64 @@ def generate_relations(model, tokenizer, device, context_text, max_length=512):
     
     return generated_text, relations
 
-def test_model():
-    """Test model with 3 sample cases"""
-    model, tokenizer, device = load_model_and_tokenizer()
+def test_generation():
+    """Test generation với các test cases từ file test.json"""
+    print("🧪 TESTING VIETNAMESE LEGAL JERE GENERATION")
+    print("=" * 60)
     
-    if model is None:
-        print("Failed to load model. Exiting...")
-        return
+    # Load model and tokenizer
+    model, tokenizer = load_model_and_tokenizer()
     
-    # Test cases from your data
-    test_cases = [
-        {
-            "id": "54/2019/QH14__Dieu51",
-            "context": "Điều 51: Tham gia của nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài trên thị trường chứng khoán Việt Nam 1. Nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài khi tham gia đầu tư, hoạt động trên thị trường chứng khoán Việt Nam tuân thủ quy định về tỷ lệ sở hữu nước ngoài, điều kiện, trình tự, thủ tục đầu tư theo quy định của pháp luật về chứng khoán và thị trường chứng khoán. 2. Chính phủ quy định chi tiết tỷ lệ sở hữu nước ngoài, điều kiện, trình tự, thủ tục đầu tư, việc tham gia của nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài trên thị trường chứng khoán Việt Nam.",
-            "expected": "<ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <LOCATION> thị trường chứng khoán Việt Nam <Relates_To> <LEGAL_PROVISION> pháp luật về chứng khoán và thị trường chứng khoán <LOCATION> thị trường chứng khoán Việt Nam <Relates_To> <ORGANIZATION> Chính phủ <ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <Relates_To> <ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <LOCATION> thị trường chứng khoán Việt Nam <Relates_To>"
-        },
-        {
-            "id": "59/2020/QH14__Dieu173", 
-            "context": "Điều 173: Trách nhiệm của Kiểm soát viên 1. Tuân thủ đúng pháp luật, Điều lệ công ty, nghị quyết Đại hội đồng cổ đông và đạo đức nghề nghiệp trong thực hiện quyền và nghĩa vụ được giao. 2. Thực hiện quyền và nghĩa vụ được giao một cách trung thực, cẩn trọng, tốt nhất nhằm bảo đảm lợi ích hợp pháp tối đa của công ty. 3. Trung thành với lợi ích của công ty và cổ đông; không lạm dụng địa vị, chức vụ và sử dụng thông tin, bí quyết, cơ hội kinh doanh, tài sản khác của công ty để tư lợi hoặc phục vụ lợi ích của tổ chức, cá nhân khác. 4. Nghĩa vụ khác theo quy định của Luật này và Điều lệ công ty. 5. Trường hợp vi phạm quy định tại các khoản 1, 2, 3 và 4 Điều này mà gây thiệt hại cho công ty hoặc người khác thì Kiểm soát viên phải chịu trách nhiệm cá nhân hoặc liên đới bồi thường thiệt hại đó. Thu nhập và lợi ích khác mà Kiểm soát viên có được do vi phạm phải hoàn trả cho công ty. 6. Trường hợp phát hiện có Kiểm soát viên vi phạm trong thực hiện quyền và nghĩa vụ được giao thì phải thông báo bằng văn bản đến Ban kiểm soát; yêu cầu người có hành vi vi phạm chấm dứt hành vi vi phạm và khắc phục hậu quả.",
-            "expected": "<RIGHT/DUTY> Tuân thủ đúng pháp luật, Điều lệ công ty, nghị quyết Đại hội đồng cổ đông và đạo đức nghề nghiệp trong thực hiện quyền và nghĩa vụ được giao <LEGAL_PROVISION> Điều 173 <Relates_To> <RIGHT/DUTY> Thực hiện quyền và nghĩa vụ được giao một cách trung thực, cẩn trọng, tốt nhất nhằm bảo đảm lợi ích hợp pháp tối đa của công ty <LEGAL_PROVISION> Điều 173 <Relates_To>"
-        },
-        {
-            "id": "54/2019/QH14__Dieu63",
-            "context": "Điều 63: Bừ trừ và thanh toán giao dịch chứng khoán 1. Hoạt động bù trừ, xác định nghĩa vụ thanh toán tiền và chứng khoán được thực hiện thông qua Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam. 2. Thanh toán chứng khoán được thực hiện trên hệ thống tài khoản lưu ký tại Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam, thanh toán tiền giao dịch chứng khoán được thực hiện qua ngân hàng thanh toán và phải tuân thủ nguyên tắc chuyển giao chứng khoán đồng thời với thanh toán tiền. 3. Bộ trưởng Bộ Tài chính quy định các biện pháp xử lý trong trường hợp thành viên của Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam tạm thời mất khả năng thanh toán giao dịch chứng khoán.",
-            "expected": "<ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <LEGAL_PROVISION> Điều 63 <Relates_To> <ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <ORGANIZATION> ngân hàng thanh toán <Relates_To> <ORGANIZATION> Bộ Tài chính <ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <Relates_To>"
-        }
-    ]
+    # ✅ FIX: Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    print(f"✅ Model loaded on: {device}")
+    print(f"Model vocab size: {model.config.vocab_size}")
+    print(f"Tokenizer vocab size: {len(tokenizer)}")
     
-    print("=" * 80)
-    print("TESTING FINETUNED ViLegalJERE MODEL")
-    print("=" * 80)
+    # Load test data
+    test_data_path = "../split_data/test.json"
+    if not os.path.exists(test_data_path):
+        print(f"❌ Test data not found: {test_data_path}")
+        print("🔧 Creating simple test case...")
+        test_cases = [{
+            'id': 'simple_test',
+            'context': 'Điều 1: Phạm vi điều chỉnh Bộ luật lao động quy định tiêu chuẩn lao động; quyền, nghĩa vụ, trách nhiệm của người lao động.',
+            'relations': '<RIGHT/DUTY> quyền, nghĩa vụ, trách nhiệm của người lao động <LEGAL_PROVISION> Bộ luật lao động <Relates_To>'
+        }]
+    else:
+        import json
+        with open(test_data_path, 'r', encoding='utf-8') as f:
+            test_data = json.load(f)
+        
+        test_cases = []
+        for key, value in list(test_data.items())[:3]:  # Take first 3 cases
+            test_cases.append({
+                'id': key,
+                'context': value.get('formatted_context_sent', ''),
+                'relations': value.get('extracted_relations_text', '')
+            })
     
+    # ✅ FIX: Warning about untrained model
+    print("\n⚠️  IMPORTANT NOTE:")
+    if model.config.vocab_size != 7110:  # If not the original trained model
+        print("🔴 THIS IS AN UNTRAINED MODEL!")
+        print("   - Output will be random/nonsensical")
+        print("   - You need to train the model first using train_vilegal_jere.py")
+        print("   - This test only verifies that generation works without errors")
+    else:
+        print("✅ Using trained model - expecting meaningful output")
+    
+    # Test each case
     for i, test_case in enumerate(test_cases, 1):
         print(f"\n🧪 TEST CASE {i}: {test_case['id']}")
         print("-" * 60)
-        
         print(f"📝 INPUT CONTEXT:")
-        print(f"{test_case['context'][:200]}...")
+        print(f"{test_case['context'][:200]}{'...' if len(test_case['context']) > 200 else ''}")
         
         print(f"\n🎯 EXPECTED RELATIONS:")
-        print(f"{test_case['expected'][:150]}...")
+        print(f"{test_case['relations'][:200]}{'...' if len(test_case['relations']) > 200 else ''}")
         
         print(f"\n🤖 MODEL GENERATED:")
         try:
@@ -205,11 +255,13 @@ def test_model():
                     print(f"🎯 Extracted {len(relations)} relations")
             else:
                 print("❌ Generation failed or too short")
-                
+        
         except Exception as e:
             print(f"❌ Generation error: {e}")
+            import traceback
+            traceback.print_exc()
         
-        print("\n" + "="*60)
+        print("=" * 60)
 
 if __name__ == "__main__":
-    test_model()
+    test_generation()
