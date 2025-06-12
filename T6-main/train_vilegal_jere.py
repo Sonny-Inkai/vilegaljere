@@ -33,15 +33,16 @@ if finetune:
     finetune_file_name = "finetune.json"
     out_dir = '/kaggle/working/out_vilegal_t5small' # Thư mục chứa checkpoint pre-trained
     
-    # ✅ FIXED: Siêu tham số cho fine-tuning tối ưu cho T4x2
-    learning_rate = 5e-5 # T5 fine-tuning standard (thấp hơn cho stability)
-    max_iters = 6000     # Giảm để fit trong Kaggle time limit
-    batch_size = 32      # ✅ FIXED: Giảm cho T4 memory (16GB VRAM)
-    gradient_accumulation_steps = 2  # ✅ FIXED: Tăng để maintain effective batch size
-    weight_decay = 0.001  # ✅ FIXED: Standard weight decay cho T5
-    eval_interval = 200  # ✅ FIXED: Tăng để save time
-    log_interval = 10    # ✅ FIXED: Reduce logging frequency
-    eval_iters = 100     # ✅ FIXED: Giảm để save time
+    # ✅ FIXED: Better hyperparameters for relation extraction fine-tuning
+    learning_rate = 3e-4 # ✅ FIXED: Higher learning rate for fine-tuning stability
+    max_iters = 3000     # ✅ FIXED: Sufficient iterations for fine-tuning convergence
+    batch_size = 16      # ✅ FIXED: Smaller batch for better gradient stability
+    gradient_accumulation_steps = 4  # ✅ FIXED: Maintain effective batch size of 64
+    weight_decay = 0.01  # ✅ FIXED: Standard weight decay for transformer fine-tuning
+    eval_interval = 100  # ✅ FIXED: More frequent evaluation for monitoring
+    log_interval = 10    # ✅ FIXED: Keep logging frequency
+    eval_iters = 50      # ✅ FIXED: Faster evaluation iterations
+    warmup_iters = 300   # ✅ FIXED: Shorter warmup for fine-tuning (10% of max_iters)
     
 else:
     # --- CẤU HÌNH CHO PRE-TRAINING ---
@@ -85,8 +86,7 @@ beta2 = 0.999
 grad_clip = 1.0
 # learning rate decay settings
 decay_lr = True
-warmup_iters = 2000   # ✅ FIXED: Longer warmup for stability (was 1000)
-lr_decay_iters = 10000  # ✅ FIXED: Match max_iters for full decay (was 10000)
+lr_decay_iters = max_iters  # ✅ FIXED: Match max_iters for proper decay schedule
 min_lr = 5e-6        # ✅ FIXED: Higher min_lr to avoid vanishing gradients (was 1e-6)
 # DDP settings for Kaggle T4x2
 backend = 'gloo'  # Use gloo instead of nccl for better Kaggle compatibility
@@ -106,32 +106,37 @@ scale_attn_by_inverse_layer_idx = False
 # Import ViLegalJERE model
 from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 
-# Initialize tokenizer và ✅ THÊM SPECIAL TOKENS
-tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+# ✅ FIXED: Custom tokenizer with domain tokens
+def load_custom_tokenizer():
+    """Load custom trained tokenizer with domain-specific tokens"""
+    from transformers import AutoTokenizer
+    
+    # Load base tokenizer
+    tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+    
+    # ✅ ADD domain-specific tokens for Vietnamese Legal JERE
+    domain_special_tokens = [
+        "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
+        "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
+        "<Relates_To>", "<Amended_By>"
+    ]
+    
+    # Add special tokens to tokenizer
+    special_tokens_dict = {'additional_special_tokens': domain_special_tokens}
+    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+    
+    print(f"✅ Added {num_added_toks} domain-specific tokens")
+    print(f"📊 New vocab size: {len(tokenizer)}")
+    
+    # ✅ VERIFY tokens were added correctly
+    for token in domain_special_tokens:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        print(f"  {token}: {token_id}")
+    
+    return tokenizer
 
-# ✅ FIX: Thêm tất cả special tokens cần thiết cho Vietnamese Legal JERE
-domain_special_tokens = [
-    "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
-    "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
-    "<Relates_To>", "<Amended_By>"
-]
-
-# ✅ FIX: Chỉ dùng domain special tokens
-all_special_tokens = domain_special_tokens
-
-# ✅ FIX: Thêm vào tokenizer
-tokenizer.add_tokens(all_special_tokens, special_tokens=True)
-
-print(f"✅ Added {len(all_special_tokens)} special tokens to tokenizer")
-print(f"New tokenizer vocab size: {len(tokenizer)}")
-
-# ✅ FIX: Test một vài special tokens
-print("🧪 Testing special tokens:")
-for token in ["<ORGANIZATION>", "<LEGAL_PROVISION>", "<Relates_To>"]:
-    token_id = tokenizer.convert_tokens_to_ids(token)
-    print(f"  {token}: {token_id}")
-    if token_id == tokenizer.unk_token_id:
-        print(f"  ⚠️ WARNING: {token} not recognized!")
+# Initialize tokenizer with domain tokens
+tokenizer = load_custom_tokenizer()
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -200,12 +205,14 @@ def load_legal_data():
     return tokenized_data
 
 def load_finetune_data():
-    """Tải và xử lý dữ liệu từ file finetune.json (JSON) cho fine-tuning"""
+    """Tải và xử lý dữ liệu từ file finetune.json với validation và cleanup"""
     data_file = os.path.join(data_path, finetune_file_name)
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Finetune dataset not found at {data_file}")
     
     processed_data = []
+    skipped_count = 0
+    
     with open(data_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
     
@@ -213,14 +220,47 @@ def load_finetune_data():
         source_text = value.get("formatted_context_sent", "")
         target_text = value.get("extracted_relations_text", "")
         
-        # ✅ FIX: Giữ nguyên format gốc của cháu (không thêm <triplet>)
+        # ✅ ENHANCED: Validation và cleanup
         if source_text and target_text:
-            processed_data.append((source_text, target_text))
+            # Clean and validate source text
+            source_text = source_text.strip()
+            target_text = target_text.strip()
+            
+            # ✅ VALIDATION: Check if target contains required domain tokens
+            required_tokens = ["<ORGANIZATION>", "<LOCATION>", "<LEGAL_PROVISION>", "<RIGHT/DUTY>", "<PERSON>"]
+            has_domain_tokens = any(token in target_text for token in required_tokens)
+            
+            # ✅ VALIDATION: Check reasonable length
+            if (50 <= len(source_text) <= 2000 and 
+                20 <= len(target_text) <= 1000 and 
+                has_domain_tokens):
+                processed_data.append((source_text, target_text))
+            else:
+                skipped_count += 1
+                if master_process and skipped_count <= 3:
+                    print(f"⚠️ Skipping invalid pair:")
+                    print(f"   Source len: {len(source_text)}, Target len: {len(target_text)}")
+                    print(f"   Has tokens: {has_domain_tokens}")
+                    print(f"   Target: {target_text[:100]}...")
+        else:
+            skipped_count += 1
     
     if master_process:
-        print(f"Loaded {len(processed_data)} fine-tuning pairs")
-        print(f"Sample input: {processed_data[0][0][:100]}...")
-        print(f"Sample target: {processed_data[0][1][:100]}...")
+        print(f"✅ Loaded {len(processed_data)} valid fine-tuning pairs")
+        print(f"⚠️ Skipped {skipped_count} invalid pairs")
+        
+        # ✅ SHOW sample data for verification
+        if processed_data:
+            print("\n📝 SAMPLE TRAINING DATA:")
+            sample_input, sample_target = processed_data[0]
+            print(f"📥 Input: {sample_input[:150]}...")
+            print(f"🎯 Target: {sample_target[:150]}...")
+            
+            # ✅ CHECK tokenization
+            input_tokens = tokenizer.tokenize(sample_input)
+            target_tokens = tokenizer.tokenize(sample_target)
+            print(f"📊 Input tokens: {len(input_tokens)}, Target tokens: {len(target_tokens)}")
+    
     return processed_data
 
 # ✅ Helper functions cho T5 span corruption theo chuẩn Google
@@ -362,79 +402,111 @@ print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
 def get_batch(split):
     """
-    HÀM GET_BATCH ĐA NĂNG - Hỗ trợ cả pre-training và fine-tuning
+    ✅ ENHANCED GET_BATCH - Properly handles both pre-training and fine-tuning with T5 format
     """
     data = train_data if split == 'train' else val_data
     if not data:
         raise ValueError(f"Data split '{split}' is empty. Check data loading.")
 
     if finetune:
-        # --- LẤY BATCH CHO FINE-TUNING ---
+        # --- ✅ IMPROVED FINE-TUNING BATCH PROCESSING ---
         ix = np.random.randint(len(data), size=(batch_size,))
         batch_pairs = [data[i] for i in ix]
         
-        # Lấy các cặp (context, relations)
+        # Extract source and target texts
         source_texts = [pair[0] for pair in batch_pairs]
         target_texts = [pair[1] for pair in batch_pairs]
         
-        # Tokenize source và target
-        input_encodings = tokenizer(source_texts, padding=True, truncation=True, 
-                                  max_length=max_source_length, return_tensors="pt")
-        target_encodings = tokenizer(target_texts, padding=True, truncation=True, 
-                                   max_length=max_target_length, return_tensors="pt")
+        # ✅ CRITICAL FIX: Add T5-style task prefix for relation extraction
+        source_texts = [f"extract relations: {text}" for text in source_texts]
+        
+        # ✅ PROPER T5 tokenization with appropriate max lengths
+        input_encodings = tokenizer(
+            source_texts, 
+            padding=True, 
+            truncation=True, 
+            max_length=max_source_length, 
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+        
+        target_encodings = tokenizer(
+            target_texts, 
+            padding=True, 
+            truncation=True, 
+            max_length=max_target_length, 
+            return_tensors="pt",
+            add_special_tokens=True
+        )
         
         input_ids = input_encodings.input_ids
         attention_mask = input_encodings.attention_mask.to(torch.bool)
         labels = target_encodings.input_ids
         
-        # ✅ Tạo decoder_input_ids đúng cách với eos_token_id
-        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.eos_token_id), labels[:, :-1]], dim=-1)
-        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id)
-        decoder_input_ids = temp_decoder_input_ids
+        # ✅ CRITICAL FIX: Proper T5 decoder input construction
+        # T5 decoder starts with pad token, then target sequence (shifted right)
+        decoder_input_ids = torch.full((labels.shape[0], 1), tokenizer.pad_token_id, dtype=torch.long)
+        decoder_input_ids = torch.cat([decoder_input_ids, labels[:, :-1]], dim=-1)
+        
+        # ✅ PROPER decoder attention mask
+        decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id)
+        
+        # ✅ ENHANCED: Debug info for fine-tuning
+        if master_process and np.random.random() < 0.01:  # 1% chance to show debug
+            print(f"\n🔍 BATCH DEBUG INFO:")
+            print(f"📥 Sample input: {tokenizer.decode(input_ids[0][:50])}")
+            print(f"🎯 Sample target: {tokenizer.decode(labels[0][:50])}")
+            print(f"🔄 Sample decoder_input: {tokenizer.decode(decoder_input_ids[0][:50])}")
         
     else:
-        # --- LẤY BATCH CHO PRE-TRAINING (logic cũ) ---
+        # --- ✅ MAINTAINED PRE-TRAINING LOGIC ---
         batch_input_ids = []
         batch_labels = []
         
         for _ in range(batch_size):
             article_tokens = data[np.random.randint(len(data))]
+            
+            # ✅ ENHANCED: Better error handling for span corruption
+            if len(article_tokens) < 10:  # Skip very short articles
+                article_tokens = data[np.random.randint(len(data))]
+            
             input_tokens, target_tokens = create_t5_spans(article_tokens)
             
-            # Cắt bớt và đệm
-            input_padded = input_tokens[:max_source_length] + [tokenizer.pad_token_id] * (max_source_length - len(input_tokens))
-            labels_padded = target_tokens[:max_target_length] + [tokenizer.pad_token_id] * (max_target_length - len(target_tokens))
+            # Pad/truncate to fixed lengths
+            input_padded = (input_tokens[:max_source_length] + 
+                          [tokenizer.pad_token_id] * max(0, max_source_length - len(input_tokens)))[:max_source_length]
+            labels_padded = (target_tokens[:max_target_length] + 
+                           [tokenizer.pad_token_id] * max(0, max_target_length - len(target_tokens)))[:max_target_length]
             
             batch_input_ids.append(input_padded)
             batch_labels.append(labels_padded)
         
-        # Chuyển thành tensor
+        # Convert to tensors
         input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
         labels = torch.tensor(batch_labels, dtype=torch.long)
         
-        # ✅ Tạo attention mask đúng kiểu boolean
+        # Create attention masks
         attention_mask = (input_ids != tokenizer.pad_token_id)
         
-        # ✅ Tạo decoder_input_ids đúng cách cho pre-training  
-        temp_decoder_input_ids = torch.cat([torch.full((labels.shape[0], 1), tokenizer.eos_token_id), labels[:, :-1]], dim=-1)
-        decoder_attention_mask = (temp_decoder_input_ids != tokenizer.pad_token_id)
-        decoder_input_ids = temp_decoder_input_ids
+        # ✅ PROPER T5 decoder input for pre-training
+        decoder_input_ids = torch.full((labels.shape[0], 1), tokenizer.pad_token_id, dtype=torch.long)
+        decoder_input_ids = torch.cat([decoder_input_ids, labels[:, :-1]], dim=-1)
+        decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id)
 
-    # Chuyển lên GPU
+    # ✅ EFFICIENT GPU transfer
     if device_type == 'cuda':
-        input_ids, labels, attention_mask, decoder_attention_mask, decoder_input_ids = (
-            input_ids.pin_memory().to(device, non_blocking=True),
-            labels.pin_memory().to(device, non_blocking=True),
-            attention_mask.pin_memory().to(device, non_blocking=True),
-            decoder_attention_mask.pin_memory().to(device, non_blocking=True),
-            decoder_input_ids.pin_memory().to(device, non_blocking=True)
-        )
+        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
+        labels = labels.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
+        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
+        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
     else:
-        input_ids, labels, attention_mask, decoder_attention_mask, decoder_input_ids = (
-            input_ids.to(device), labels.to(device), attention_mask.to(device), decoder_attention_mask.to(device), decoder_input_ids.to(device)
-        )
+        input_ids = input_ids.to(device)
+        labels = labels.to(device) 
+        attention_mask = attention_mask.to(device)
+        decoder_attention_mask = decoder_attention_mask.to(device)
+        decoder_input_ids = decoder_input_ids.to(device)
     
-    # Trả về dữ liệu theo format model cần
     return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
 
 # Model initialization arguments
@@ -475,47 +547,65 @@ print(f"  decoder_start_token_id: {tokenizer.eos_token_id} (should match EOS)")
 iter_num = 0
 best_val_loss = 1e9
 
-# --- KHỐI KHỞI TẠO MODEL VÀ RESUME ĐÃ SỬA LẠI ---
+# --- ✅ FIXED MODEL INITIALIZATION WITH PROPER EMBEDDING RESIZE ---
 if init_from == 'scratch':
     if master_process:
         print("Initializing a new model from scratch")
-    # Khởi tạo model từ đầu với các tham số đã định nghĩa
+    # Initialize model with original vocab size first
     config_obj = ViLegalConfig(**model_args)
     model = ViLegalJERE(config_obj)
+    
+    # ✅ CRITICAL FIX: Resize embeddings for domain tokens AFTER model creation
+    if len(tokenizer) != model.config.vocab_size:
+        if master_process:
+            print(f"🔧 Resizing embeddings: {model.config.vocab_size} → {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+        if master_process:
+            print(f"✅ Model embeddings resized to {len(tokenizer)}")
 
 elif init_from == 'resume':
     if master_process:
         print(f"Resuming training from {out_dir}")
     
-    # Kiểm tra xem thư mục checkpoint có tồn tại không
+    # Check if checkpoint directory exists
     if not os.path.exists(out_dir):
         raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
 
-    # Tải lại model từ checkpoint đã lưu. 
-    # from_pretrained sẽ tự động tải cả config và trọng số
+    # Load model from checkpoint
     model = ViLegalJERE.from_pretrained(out_dir)
     
-    # Tải lại trạng thái của optimizer và các biến tiến trình
+    # ✅ CRITICAL FIX: Always resize embeddings when resuming to match current tokenizer
+    if len(tokenizer) != model.config.vocab_size:
+        if master_process:
+            print(f"🔧 Resizing embeddings during resume: {model.config.vocab_size} → {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
+        if master_process:
+            print(f"✅ Model embeddings resized to {len(tokenizer)}")
+    
+    # Load optimizer state if available
     optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
     if os.path.exists(optimizer_state_path):
         checkpoint = torch.load(optimizer_state_path, map_location=device)
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
         if master_process:
-            print(f"Resumed successfully from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
+            print(f"✅ Resumed successfully from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
     else:
-        # Nếu không tìm thấy file optimizer, bắt đầu từ đầu nhưng vẫn dùng model đã tải
-        print(f"Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
-        # iter_num và best_val_loss sẽ giữ giá trị mặc định là 0 và 1e9
+        if master_process:
+            print(f"⚠️ Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
 
-# Fix vocabulary size mismatch between model and tokenizer
-if model.config.vocab_size != len(tokenizer):
-    if master_process:
-        print(f"Vocab size mismatch: model={model.config.vocab_size}, tokenizer={len(tokenizer)}")
-        print("Resizing model embeddings to match tokenizer...")
-    model.resize_token_embeddings(len(tokenizer))
-    if master_process:
-        print(f"Model embeddings resized to {len(tokenizer)}")
+# ✅ VERIFICATION: Check final model configuration
+if master_process:
+    print(f"\n🔍 FINAL MODEL VERIFICATION:")
+    print(f"📊 Model vocab size: {model.config.vocab_size}")
+    print(f"📊 Tokenizer vocab size: {len(tokenizer)}")
+    print(f"📊 Model embedding shape: {model.shared.weight.shape}")
+    
+    # Test tokenization of domain tokens
+    test_tokens = ["<ORGANIZATION>", "<LOCATION>", "<Relates_To>"]
+    for token in test_tokens:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        print(f"🧪 {token}: id={token_id}, valid={token_id < model.config.vocab_size}")
 
 model.to(device)
 
@@ -777,3 +867,75 @@ while True:
 
 if ddp:
     destroy_process_group() 
+
+# ✅ ENHANCED: Test model function for debugging
+def test_model_generation(model, tokenizer, device):
+    """Test the trained model with a sample input"""
+    model.eval()
+    
+    # Test input with relation extraction prefix
+    test_input = "extract relations: Điều 51: Tham gia của nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài trên thị trường chứng khoán Việt Nam"
+    
+    print(f"\n🧪 TESTING MODEL GENERATION:")
+    print(f"📥 Input: {test_input}")
+    
+    # Tokenize input
+    inputs = tokenizer(test_input, return_tensors="pt", max_length=512, truncation=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+    try:
+        # Generate using enhanced method
+        with torch.no_grad():
+            if hasattr(model, 'generate_relations'):
+                outputs = model.generate_relations(
+                    inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_length=256,
+                    num_beams=3,
+                    early_stopping=True,
+                    length_penalty=1.0
+                )
+            else:
+                # Fallback to standard generate
+                outputs = model.generate(
+                    inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_length=256,
+                )
+        
+        # Decode result
+        result = tokenizer.decode(outputs[0], skip_special_tokens=False)
+        print(f"🤖 Generated: {result}")
+        
+        # Clean result
+        clean_result = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        print(f"🧹 Clean output: {clean_result}")
+        
+        # Check for domain tokens
+        domain_tokens = ["<ORGANIZATION>", "<LOCATION>", "<LEGAL_PROVISION>", "<RIGHT/DUTY>", "<PERSON>", "<Relates_To>"]
+        found_tokens = [token for token in domain_tokens if token in result]
+        print(f"🏷️  Domain tokens found: {found_tokens}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Generation failed: {e}")
+        return False
+
+# ✅ Run test if we're in fine-tuning mode and training completed
+if finetune and master_process and iter_num > 100:
+    print(f"\n{'='*60}")
+    print("🎯 FINAL MODEL TEST")
+    print(f"{'='*60}")
+    
+    raw_model = model.module if ddp else model
+    test_success = test_model_generation(raw_model, tokenizer, device)
+    
+    if test_success:
+        print("✅ Model test completed successfully!")
+    else:
+        print("❌ Model test failed!")
+        
+    print(f"{'='*60}")
+
+print(f"\n🎉 Training completed! Model saved to: {out_dir}") 

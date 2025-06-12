@@ -487,16 +487,9 @@ class ViLegalJERE(PreTrainedModel):
         do_sample=True,
         temperature=0.7,
         top_p=0.9,
-        num_beams=1,
-        early_stopping=True,
-        no_repeat_ngram_size=0,
         pad_token_id=None,
         eos_token_id=None,
-        **kwargs
     ):
-        """
-        ✅ FIXED: Enhanced generate function with full parameter support
-        """
         # ✅ FIXED: Handle None values properly by falling back to config
         pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
         eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
@@ -517,91 +510,18 @@ class ViLegalJERE(PreTrainedModel):
         encoder_outputs = self.encode(input_ids, attention_mask)
         encoder_hidden_states = encoder_outputs.last_hidden_state
         
-        # ✅ FIXED: Support beam search
-        if num_beams > 1:
-            return self._beam_search_generate(
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=attention_mask,
-                max_length=max_length,
-                num_beams=num_beams,
-                early_stopping=early_stopping,
-                pad_token_id=pad_token_id,
-                eos_token_id=eos_token_id,
-                decoder_start_token_id=decoder_start_token_id,
-                no_repeat_ngram_size=no_repeat_ngram_size
-            )
-        
-        # ✅ FIXED: Greedy/sampling generation
-        return self._greedy_sample_generate(
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=attention_mask,
-            max_length=max_length,
-            do_sample=do_sample,
-            temperature=temperature,
-            top_p=top_p,
-            pad_token_id=pad_token_id,
-            eos_token_id=eos_token_id,
-            decoder_start_token_id=decoder_start_token_id,
-            no_repeat_ngram_size=no_repeat_ngram_size
-        )
-    
-    def _has_repeated_ngram(self, tokens, ngram_size):
-        """Check if tokens contain repeated n-grams"""
-        if ngram_size == 0 or len(tokens) < ngram_size * 2:
-            return False
-        
-        for i in range(len(tokens) - ngram_size + 1):
-            ngram = tuple(tokens[i:i + ngram_size])
-            for j in range(i + ngram_size, len(tokens) - ngram_size + 1):
-                if tuple(tokens[j:j + ngram_size]) == ngram:
-                    return True
-        return False
-    
-    def _greedy_sample_generate(
-        self,
-        encoder_hidden_states,
-        encoder_attention_mask,
-        max_length,
-        do_sample,
-        temperature,
-        top_p,
-        pad_token_id,
-        eos_token_id,
-        decoder_start_token_id,
-        no_repeat_ngram_size
-    ):
-        """Greedy/sampling generation"""
-        batch_size = encoder_hidden_states.shape[0]
-        device = encoder_hidden_states.device
-        
-        # Initialize decoder input
+        # Initialize decoder input with proper token type
         decoder_input_ids = torch.full((batch_size, 1), decoder_start_token_id, dtype=torch.long, device=device)
         
         # Generate tokens
-        for step in range(max_length - 1):
+        for _ in range(max_length - 1):
             decoder_outputs = self.decode(
                 decoder_input_ids,
                 encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask
+                encoder_attention_mask=attention_mask
             )
             
             logits = decoder_outputs.logits[:, -1, :]
-            
-            # ✅ FIXED: Apply no_repeat_ngram_size constraint
-            if no_repeat_ngram_size > 0:
-                for batch_idx in range(batch_size):
-                    current_tokens = decoder_input_ids[batch_idx].tolist()
-                    if len(current_tokens) >= no_repeat_ngram_size:
-                        # Get last n-1 tokens to form the beginning of potential n-gram
-                        prefix = current_tokens[-(no_repeat_ngram_size-1):]
-                        # Check all possible next tokens
-                        for token_id in range(logits.shape[-1]):
-                            test_ngram = prefix + [token_id]
-                            # Check if this n-gram appeared before
-                            for i in range(len(current_tokens) - no_repeat_ngram_size + 1):
-                                if current_tokens[i:i + no_repeat_ngram_size] == test_ngram:
-                                    logits[batch_idx, token_id] = float('-inf')
-                                    break
             
             if do_sample:
                 # Apply temperature
@@ -630,101 +550,174 @@ class ViLegalJERE(PreTrainedModel):
                 break
                 
         return decoder_input_ids
-    
-    def _beam_search_generate(
+
+    def generate_relations(
         self,
-        encoder_hidden_states,
-        encoder_attention_mask,
-        max_length,
-        num_beams,
-        early_stopping,
-        pad_token_id,
-        eos_token_id,
-        decoder_start_token_id,
-        no_repeat_ngram_size
+        input_ids,
+        attention_mask=None,
+        max_length=512,
+        num_beams=3,
+        early_stopping=True,
+        length_penalty=1.0,
+        temperature=1.0,
+        do_sample=False,
     ):
-        """Simple beam search generation - FIXED"""
+        """
+        ✅ ENHANCED: Generate relation extractions with proper T5 formatting for Vietnamese Legal JERE
+        """
+        self.eval()
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+        
+        # Handle None values with proper fallbacks
+        pad_token_id = getattr(self.config, 'pad_token_id', 0)
+        eos_token_id = getattr(self.config, 'eos_token_id', 3)
+        decoder_start_token_id = getattr(self.config, 'decoder_start_token_id', pad_token_id)
+        
+        with torch.no_grad():
+            # Encode input
+            encoder_outputs = self.encode(input_ids, attention_mask)
+            encoder_hidden_states = encoder_outputs.last_hidden_state
+            
+            # ✅ CRITICAL: Start decoder with pad token (T5 standard)
+            decoder_input_ids = torch.full(
+                (batch_size, 1), 
+                decoder_start_token_id, 
+                dtype=torch.long, 
+                device=device
+            )
+            
+            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+            
+            # ✅ ENHANCED: Beam search generation for better quality
+            if num_beams > 1:
+                return self._beam_search_generation(
+                    encoder_hidden_states, attention_mask, max_length, 
+                    num_beams, length_penalty, early_stopping
+                )
+            
+            # Greedy/sampling generation
+            for step in range(max_length - 1):
+                if finished.all():
+                    break
+                    
+                decoder_outputs = self.decode(
+                    decoder_input_ids,
+                    encoder_hidden_states,
+                    encoder_attention_mask=attention_mask
+                )
+                
+                logits = decoder_outputs.logits[:, -1, :]
+                
+                # Apply temperature for sampling
+                if do_sample and temperature != 1.0:
+                    logits = logits / temperature
+                
+                # Get next tokens
+                if do_sample:
+                    # Top-k sampling for diversity
+                    top_k = min(50, logits.shape[-1])
+                    top_logits, top_indices = torch.topk(logits, top_k)
+                    probs = F.softmax(top_logits, dim=-1)
+                    next_token_idx = torch.multinomial(probs, num_samples=1)
+                    next_token = top_indices.gather(-1, next_token_idx)
+                else:
+                    # Greedy decoding
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
+                
+                # Update sequences
+                decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
+                
+                # Check for EOS
+                finished |= (next_token.squeeze(-1) == eos_token_id)
+                
+                if early_stopping and finished.any():
+                    break
+        
+        return decoder_input_ids
+    
+    def _beam_search_generation(self, encoder_hidden_states, attention_mask, max_length, num_beams, length_penalty, early_stopping):
+        """
+        ✅ SIMPLIFIED beam search implementation for relation extraction
+        """
         batch_size = encoder_hidden_states.shape[0]
         device = encoder_hidden_states.device
-        vocab_size = self.config.vocab_size
         
-        # Expand encoder states for beam search
-        encoder_hidden_states = encoder_hidden_states.unsqueeze(1).repeat(1, num_beams, 1, 1).view(
-            batch_size * num_beams, encoder_hidden_states.shape[1], encoder_hidden_states.shape[2]
+        pad_token_id = getattr(self.config, 'pad_token_id', 0)
+        eos_token_id = getattr(self.config, 'eos_token_id', 3)
+        
+        # Expand encoder outputs for beam search
+        encoder_hidden_states = encoder_hidden_states.unsqueeze(1).expand(
+            batch_size, num_beams, -1, -1
+        ).reshape(batch_size * num_beams, -1, encoder_hidden_states.shape[-1])
+        
+        if attention_mask is not None:
+            attention_mask = attention_mask.unsqueeze(1).expand(
+                batch_size, num_beams, -1
+            ).reshape(batch_size * num_beams, -1)
+        
+        # Initialize beam
+        decoder_input_ids = torch.full(
+            (batch_size * num_beams, 1), 
+            pad_token_id, 
+            dtype=torch.long, 
+            device=device
         )
         
-        if encoder_attention_mask is not None:
-            encoder_attention_mask = encoder_attention_mask.unsqueeze(1).repeat(1, num_beams, 1).view(
-                batch_size * num_beams, encoder_attention_mask.shape[1]
-            )
+        scores = torch.zeros(batch_size * num_beams, device=device)
         
-        # Initialize beams
-        beam_scores = torch.zeros((batch_size, num_beams), device=device)
-        beam_scores[:, 1:] = -1e9  # Only first beam is active initially
-        beam_scores = beam_scores.view(-1)
-        
-        # Initialize decoder input
-        decoder_input_ids = torch.full((batch_size * num_beams, 1), decoder_start_token_id, dtype=torch.long, device=device)
-        
-        # Generate tokens
         for step in range(max_length - 1):
             decoder_outputs = self.decode(
                 decoder_input_ids,
                 encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask
+                encoder_attention_mask=attention_mask
             )
             
-            logits = decoder_outputs.logits[:, -1, :]  # [batch_size * num_beams, vocab_size]
-            log_probs = F.log_softmax(logits, dim=-1)
+            logits = decoder_outputs.logits[:, -1, :]
             
-            # Add beam scores to log probabilities
-            log_probs = log_probs + beam_scores.unsqueeze(-1)
+            # Apply length penalty
+            if step > 0:
+                scores = scores.unsqueeze(-1) + F.log_softmax(logits, dim=-1)
+                scores = scores / (step + 1) ** length_penalty
+            else:
+                scores = F.log_softmax(logits, dim=-1)
             
-            # Reshape for beam selection
-            log_probs = log_probs.view(batch_size, num_beams * vocab_size)
+            # Get top candidates
+            vocab_size = scores.shape[-1]
+            scores = scores.view(batch_size, num_beams * vocab_size)
+            next_scores, next_tokens = torch.topk(scores, num_beams, dim=-1)
             
-            # ✅ FIX: Select top num_beams (not 2*num_beams)
-            top_log_probs, top_indices = torch.topk(log_probs, num_beams, dim=-1)
+            # Convert back to beam format
+            beam_idx = next_tokens // vocab_size
+            token_idx = next_tokens % vocab_size
             
-            next_beam_scores = []
-            next_beam_tokens = []
-            next_beam_indices = []
+            # Update sequences
+            beam_idx = beam_idx.view(-1)
+            token_idx = token_idx.view(-1)
             
-            for batch_idx in range(batch_size):
-                for beam_idx in range(num_beams):
-                    score = top_log_probs[batch_idx, beam_idx].item()
-                    idx = top_indices[batch_idx, beam_idx].item()
-                    
-                    # ✅ FIX: Correct beam and token calculation
-                    beam_id = idx // vocab_size
-                    token_id = idx % vocab_size
-                    
-                    next_beam_scores.append(score)
-                    next_beam_tokens.append(token_id)
-                    next_beam_indices.append(batch_idx * num_beams + beam_id)
+            # Gather previous sequences
+            decoder_input_ids = decoder_input_ids[beam_idx + torch.arange(
+                0, batch_size * num_beams, num_beams, device=device
+            ).unsqueeze(1).expand(-1, num_beams).view(-1)]
             
-            # Update beam scores and tokens
-            beam_scores = torch.tensor(next_beam_scores, device=device)
-            next_tokens = torch.tensor(next_beam_tokens, device=device).unsqueeze(-1)
-            beam_indices = torch.tensor(next_beam_indices, device=device)
+            # Append new tokens
+            decoder_input_ids = torch.cat([
+                decoder_input_ids, 
+                token_idx.unsqueeze(-1)
+            ], dim=-1)
             
-            # ✅ FIX: Check for out of range tokens
-            valid_tokens = next_tokens.squeeze(-1) < vocab_size
-            if not valid_tokens.all():
-                print(f"⚠️ Warning: Some tokens out of range, clamping...")
-                next_tokens = torch.clamp(next_tokens, 0, vocab_size - 1)
+            scores = next_scores.view(-1)
             
-            # Reorder decoder_input_ids according to beam_indices
-            decoder_input_ids = decoder_input_ids[beam_indices]
-            decoder_input_ids = torch.cat([decoder_input_ids, next_tokens], dim=1)
-            
-            # Check for EOS - simple early stopping
-            if early_stopping and (next_tokens.squeeze(-1) == eos_token_id).any():
+            # Check for early stopping
+            if early_stopping and (token_idx == eos_token_id).any():
                 break
         
         # Return best beam for each batch
-        decoder_input_ids = decoder_input_ids.view(batch_size, num_beams, -1)
-        return decoder_input_ids[:, 0, :]  # Return best beam
+        best_scores, best_idx = scores.view(batch_size, num_beams).max(dim=-1)
+        best_sequences = decoder_input_ids.view(batch_size, num_beams, -1)
+        result = best_sequences[torch.arange(batch_size), best_idx]
+        
+        return result
 
     def get_num_params(self, non_embedding=True):
         n_params = sum(p.numel() for p in self.parameters())
