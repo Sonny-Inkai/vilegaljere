@@ -3,11 +3,42 @@ import json
 from transformers import AutoTokenizer
 from model.ViLegalJERE import ViLegalJERE
 
+# ✅ FIXED: Custom tokenizer with domain tokens
+def load_custom_tokenizer():
+    """Load custom trained tokenizer with domain-specific tokens"""
+    
+    # Load base tokenizer
+    tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+    
+    # ✅ ADD domain-specific tokens for Vietnamese Legal JERE
+    domain_special_tokens = [
+        "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
+        "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
+        "<Relates_To>", "<Amended_By>"
+    ]
+    
+    # Add special tokens to tokenizer
+    special_tokens_dict = {'additional_special_tokens': domain_special_tokens}
+    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
+    
+    print(f"✅ Added {num_added_toks} domain-specific tokens")
+    print(f"📊 New vocab size: {len(tokenizer)}")
+    
+    # ✅ VERIFY tokens were added correctly
+    for token in domain_special_tokens:
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        print(f"  {token}: {token_id}")
+    
+    return tokenizer
+
+# Initialize tokenizer with domain tokens
+tokenizer = load_custom_tokenizer()
+
 def load_model_and_tokenizer(model_path="/kaggle/working/out_vilegal_t5small"):
     """Load finetuned model and tokenizer"""
     try:
         model = ViLegalJERE.from_pretrained(model_path)
-        tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+        tokenizer = load_custom_tokenizer()
         model.eval()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model.to(device)
