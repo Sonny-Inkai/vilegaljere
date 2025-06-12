@@ -57,10 +57,14 @@ def train(conf: omegaconf.DictConfig) -> None:
     pl_module = VietnameseLegalPLModule(conf, config, tokenizer, model)
 
     # Logger
-    wandb_logger = WandbLogger(
-        project="vietnamese-legal-re", 
-        name=f"{conf.model_name_or_path.split('/')[-1]}-legal"
-    )
+    try:
+        wandb_logger = WandbLogger(
+            project="vietnamese-legal-re", 
+            name=f"{conf.model_name_or_path.split('/')[-1]}-legal",
+            offline=True  # For Kaggle environment
+        )
+    except:
+        wandb_logger = None
 
     callbacks_store = []
 

@@ -104,7 +104,7 @@ class VietnameseLegalPLModule(pl.LightningModule):
         padded_tensor[:, : tensor.shape[-1]] = tensor
         return padded_tensor
 
-    def generate_triples(self, batch, labels) -> None:
+    def generate_triples(self, batch, labels):
         """Generate triplets for Vietnamese legal documents"""
         
         gen_kwargs = {
@@ -136,7 +136,7 @@ class VietnameseLegalPLModule(pl.LightningModule):
             [extract_vietnamese_legal_triplets(rel) for rel in decoded_labels]
         )
 
-    def validation_step(self, batch: dict, batch_idx: int) -> None:
+    def validation_step(self, batch: dict, batch_idx: int):
         labels = batch.pop("labels")
         labels_original = labels.clone()
         batch["decoder_input_ids"] = torch.where(labels != -100, labels, self.config.pad_token_id)
@@ -180,7 +180,7 @@ class VietnameseLegalPLModule(pl.LightningModule):
             'val_f1': avg_f1
         }
 
-    def test_step(self, batch: dict, batch_idx: int) -> None:
+    def test_step(self, batch: dict, batch_idx: int):
         labels = batch.pop("labels")
         labels_original = labels.clone()
         batch["decoder_input_ids"] = torch.where(labels != -100, labels, self.config.pad_token_id)
@@ -224,29 +224,13 @@ class VietnameseLegalPLModule(pl.LightningModule):
             'test_f1': avg_f1
         }
 
-    def validation_epoch_end(self, outputs) -> Any:
-        if outputs:
-            avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-            avg_precision = np.mean([x['val_precision'] for x in outputs])
-            avg_recall = np.mean([x['val_recall'] for x in outputs])
-            avg_f1 = np.mean([x['val_f1'] for x in outputs])
-            
-            self.log('val_loss_epoch', avg_loss)
-            self.log('val_precision_epoch', avg_precision)
-            self.log('val_recall_epoch', avg_recall)
-            self.log('val_f1_epoch', avg_f1)
+    def on_validation_epoch_end(self):
+        # PyTorch Lightning v2.0+ hook
+        pass
 
-    def test_epoch_end(self, outputs) -> Any:
-        if outputs:
-            avg_loss = torch.stack([x['test_loss'] for x in outputs]).mean()
-            avg_precision = np.mean([x['test_precision'] for x in outputs])
-            avg_recall = np.mean([x['test_recall'] for x in outputs])
-            avg_f1 = np.mean([x['test_f1'] for x in outputs])
-            
-            self.log('test_loss_epoch', avg_loss)
-            self.log('test_precision_epoch', avg_precision)
-            self.log('test_recall_epoch', avg_recall)
-            self.log('test_f1_epoch', avg_f1)
+    def on_test_epoch_end(self):
+        # PyTorch Lightning v2.0+ hook
+        pass
 
     def configure_optimizers(self):
         """Prepare optimizer and schedule (linear warmup and decay)"""

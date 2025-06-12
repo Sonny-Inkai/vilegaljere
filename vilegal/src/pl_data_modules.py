@@ -128,7 +128,7 @@ class VietnameseLegalPLDataModule(pl.LightningDataModule):
                 padding=self.padding
             )
             
-            if self.conf.max_train_samples is not None:
+            if hasattr(self.conf, 'max_train_samples') and self.conf.max_train_samples is not None:
                 self.train_dataset.examples = self.train_dataset.examples[:self.conf.max_train_samples]
 
         if stage == "fit" or stage == "validate" or stage is None:
@@ -142,7 +142,7 @@ class VietnameseLegalPLDataModule(pl.LightningDataModule):
                     padding=self.padding
                 )
                 
-                if self.conf.max_val_samples is not None:
+                if hasattr(self.conf, 'max_val_samples') and self.conf.max_val_samples is not None:
                     self.val_dataset.examples = self.val_dataset.examples[:self.conf.max_val_samples]
 
         if stage == "test" or stage is None:
@@ -156,7 +156,7 @@ class VietnameseLegalPLDataModule(pl.LightningDataModule):
                     padding=self.padding
                 )
                 
-                if self.conf.max_test_samples is not None:
+                if hasattr(self.conf, 'max_test_samples') and self.conf.max_test_samples is not None:
                     self.test_dataset.examples = self.test_dataset.examples[:self.conf.max_test_samples]
 
     def train_dataloader(self, *args, **kwargs) -> DataLoader:
