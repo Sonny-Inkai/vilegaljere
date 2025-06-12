@@ -8,6 +8,31 @@ def load_model_and_tokenizer(model_path="/kaggle/working/out_vilegal_t5small"):
     try:
         model = ViLegalJERE.from_pretrained(model_path)
         tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+        
+        # ✅ FIX: Thêm tất cả special tokens cần thiết cho Vietnamese Legal JERE
+        domain_special_tokens = [
+            "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
+            "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
+            "<Relates_To>", "<Amended_By>"
+        ]
+        
+        # ✅ FIX: Không cần triplet tokens vì cháu dùng format riêng
+        # triplet_tokens = ["<triplet>", "<subj>", "<obj>"]  # Bỏ dòng này
+        
+        # ✅ FIX: Chỉ dùng domain special tokens  
+        all_special_tokens = domain_special_tokens
+        
+        # ✅ FIX: Thêm vào tokenizer
+        tokenizer.add_tokens(all_special_tokens, special_tokens=True)
+        
+        print(f"✅ Added {len(all_special_tokens)} special tokens to tokenizer")
+        print(f"New tokenizer vocab size: {len(tokenizer)}")
+        
+        # ✅ FIX: Model phải resize để match tokenizer
+        if model.config.vocab_size != len(tokenizer):
+            print(f"🔧 Resizing model embeddings from {model.config.vocab_size} to {len(tokenizer)}")
+            model.resize_token_embeddings(len(tokenizer))
+        
         model.eval()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model.to(device)
@@ -18,6 +43,70 @@ def load_model_and_tokenizer(model_path="/kaggle/working/out_vilegal_t5small"):
     except Exception as e:
         print(f"Error loading model: {e}")
         return None, None, None
+
+def extract_vietnamese_legal_relations(text):
+    """
+    Trích xuất relations từ generated text theo format Vietnamese Legal JERE
+    Format: <ENTITY_TYPE> entity_text <ENTITY_TYPE> entity_text <RELATION_TYPE>
+    """
+    relations = []
+    
+    # Làm sạch text
+    text = text.replace("<s>", "").replace("</s>", "").replace("<pad>", "").strip()
+    
+    # ✅ FIX: Parse theo format của cháu: <HEAD_TYPE> head_text <TAIL_TYPE> tail_text <RELATION>
+    tokens = text.split()
+    
+    # Entity và relation types
+    entity_types = ["<ORGANIZATION>", "<LOCATION>", "<LEGAL_PROVISION>", "<RIGHT/DUTY>", "<PERSON>", "<DATE/TIME>"]
+    relation_types = ["<Relates_To>", "<Effective_From>", "<Applicable_In>", "<Amended_By>"]
+    
+    i = 0
+    while i < len(tokens):
+        # Tìm head entity
+        if tokens[i] in entity_types:
+            head_type = tokens[i]
+            head_text = ""
+            i += 1
+            
+            # Collect head text until next entity type
+            while i < len(tokens) and tokens[i] not in entity_types and tokens[i] not in relation_types:
+                head_text += " " + tokens[i]
+                i += 1
+            
+            # Tìm tail entity
+            if i < len(tokens) and tokens[i] in entity_types:
+                tail_type = tokens[i]
+                tail_text = ""
+                i += 1
+                
+                # Collect tail text until relation type
+                while i < len(tokens) and tokens[i] not in entity_types and tokens[i] not in relation_types:
+                    tail_text += " " + tokens[i]
+                    i += 1
+                
+                # Tìm relation
+                if i < len(tokens) and tokens[i] in relation_types:
+                    relation = tokens[i]
+                    
+                    # Tạo triplet
+                    if head_text.strip() and tail_text.strip():
+                        relations.append({
+                            'head': head_text.strip(),
+                            'head_type': head_type.replace('<', '').replace('>', ''),
+                            'tail': tail_text.strip(),
+                            'tail_type': tail_type.replace('<', '').replace('>', ''),
+                            'relation': relation.replace('<', '').replace('>', '')
+                        })
+                    i += 1
+                else:
+                    i += 1
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    return relations
 
 def generate_relations(model, tokenizer, device, context_text, max_length=512):
     """Generate relation extraction from context"""
@@ -30,22 +119,27 @@ def generate_relations(model, tokenizer, device, context_text, max_length=512):
         return_tensors="pt"
     ).to(device)
     
-    # Generate using the model's custom generate method
+    # ✅ FIX: Sử dụng generation parameters tốt hơn
     with torch.no_grad():
         outputs = model.generate(
             input_ids=inputs['input_ids'],
             attention_mask=inputs['attention_mask'],
             max_length=max_length,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            do_sample=False,  # ✅ Sử dụng deterministic generation để debug
+            num_beams=3,      # ✅ Beam search cho output ổn định hơn
+            early_stopping=True,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id
+            eos_token_id=tokenizer.eos_token_id,
+            no_repeat_ngram_size=2  # ✅ Tránh lặp lại
         )
     
     # Decode output (skip the start token)
-    generated_text = tokenizer.decode(outputs[0, 1:], skip_special_tokens=True)
-    return generated_text
+    generated_text = tokenizer.decode(outputs[0, 1:], skip_special_tokens=False)
+    
+    # ✅ Trích xuất relations theo format Vietnamese Legal
+    relations = extract_vietnamese_legal_relations(generated_text)
+    
+    return generated_text, relations
 
 def test_model():
     """Test model with 3 sample cases"""
@@ -90,21 +184,25 @@ def test_model():
         
         print(f"\n🤖 MODEL GENERATED:")
         try:
-            generated = generate_relations(model, tokenizer, device, test_case['context'])
-            print(f"{generated}")
+            generated_text, relations = generate_relations(model, tokenizer, device, test_case['context'])
+            print(f"{generated_text}")
             
             # Simple evaluation
-            if generated and len(generated) > 10:
-                print(f"✅ Generation successful ({len(generated)} chars)")
+            if generated_text and len(generated_text) > 10:
+                print(f"✅ Generation successful ({len(generated_text)} chars)")
                 
                 # Check if output contains expected patterns
-                has_entities = any(tag in generated for tag in ["<ORGANIZATION>", "<LOCATION>", "<RIGHT/DUTY>", "<LEGAL_PROVISION>"])
-                has_relations = "<Relates_To>" in generated
+                has_entities = any(tag in generated_text for tag in ["<ORGANIZATION>", "<LOCATION>", "<RIGHT/DUTY>", "<LEGAL_PROVISION>"])
+                has_relations = "<Relates_To>" in generated_text
                 
                 if has_entities and has_relations:
                     print(f"✅ Output format looks correct (has entities and relations)")
+                    print(f"🎯 Extracted {len(relations)} relations:")
+                    for i, rel in enumerate(relations[:3]):  # Show first 3 relations
+                        print(f"   {i+1}. {rel['head']} ({rel['head_type']}) --{rel['relation']}--> {rel['tail']} ({rel['tail_type']})")
                 else:
                     print(f"⚠️ Output format may be incorrect")
+                    print(f"🎯 Extracted {len(relations)} relations")
             else:
                 print("❌ Generation failed or too short")
                 

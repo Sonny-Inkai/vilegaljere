@@ -106,8 +106,32 @@ scale_attn_by_inverse_layer_idx = False
 # Import ViLegalJERE model
 from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
 
-# Initialize tokenizer
+# Initialize tokenizer và ✅ THÊM SPECIAL TOKENS
 tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+
+# ✅ FIX: Thêm tất cả special tokens cần thiết cho Vietnamese Legal JERE
+domain_special_tokens = [
+    "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
+    "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
+    "<Relates_To>", "<Amended_By>"
+]
+
+# ✅ FIX: Chỉ dùng domain special tokens
+all_special_tokens = domain_special_tokens
+
+# ✅ FIX: Thêm vào tokenizer
+tokenizer.add_tokens(all_special_tokens, special_tokens=True)
+
+print(f"✅ Added {len(all_special_tokens)} special tokens to tokenizer")
+print(f"New tokenizer vocab size: {len(tokenizer)}")
+
+# ✅ FIX: Test một vài special tokens
+print("🧪 Testing special tokens:")
+for token in ["<ORGANIZATION>", "<LEGAL_PROVISION>", "<Relates_To>"]:
+    token_id = tokenizer.convert_tokens_to_ids(token)
+    print(f"  {token}: {token_id}")
+    if token_id == tokenizer.unk_token_id:
+        print(f"  ⚠️ WARNING: {token} not recognized!")
 
 def get_num_params(model, non_embedding=False):
     """Return the number of parameters in the model."""
@@ -189,12 +213,14 @@ def load_finetune_data():
         source_text = value.get("formatted_context_sent", "")
         target_text = value.get("extracted_relations_text", "")
         
-        # Chỉ lấy các cặp dữ liệu có cả input và output
+        # ✅ FIX: Giữ nguyên format gốc của cháu (không thêm <triplet>)
         if source_text and target_text:
             processed_data.append((source_text, target_text))
     
     if master_process:
         print(f"Loaded {len(processed_data)} fine-tuning pairs")
+        print(f"Sample input: {processed_data[0][0][:100]}...")
+        print(f"Sample target: {processed_data[0][1][:100]}...")
     return processed_data
 
 # ✅ Helper functions cho T5 span corruption theo chuẩn Google
