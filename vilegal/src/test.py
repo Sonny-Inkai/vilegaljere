@@ -38,10 +38,9 @@ def test(conf: omegaconf.DictConfig) -> None:
     model.resize_token_embeddings(len(tokenizer))
 
     # Load trained checkpoint if available
-    if conf.checkpoint_path:
+    if hasattr(conf, 'checkpoint_path') and conf.checkpoint_path:
         pl_module = VietnameseLegalPLModule.load_from_checkpoint(
             conf.checkpoint_path, 
-            conf=conf, 
             config=config, 
             tokenizer=tokenizer, 
             model=model
