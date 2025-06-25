@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 # TOKENIZER UTILITIES
 # ===============================================================================
 
-def load_custom_tokenizer():
+def load_custom_tokenizer(master_process=True):
     """Load custom trained tokenizer with domain-specific tokens"""
     from transformers import AutoTokenizer
     
@@ -34,33 +34,36 @@ def load_custom_tokenizer():
     special_tokens_dict = {'additional_special_tokens': domain_special_tokens}
     num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
     
-    print(f"✅ Added {num_added_toks} domain-specific tokens")
-    print(f"📊 New vocab size: {len(tokenizer)}")
-    
-    # ✅ VERIFY tokens were added correctly
-    for token in domain_special_tokens:
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        print(f"  {token}: {token_id}")
+    # Only print on master process to avoid duplicate logs
+    if master_process:
+        print(f"✅ Added {num_added_toks} domain-specific tokens")
+        print(f"📊 New vocab size: {len(tokenizer)}")
+        
+        # ✅ VERIFY tokens were added correctly
+        for token in domain_special_tokens:
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            print(f"  {token}: {token_id}")
     
     return tokenizer
 
-def print_tokenizer_info(tokenizer):
+def print_tokenizer_info(tokenizer, master_process=True):
     """Print tokenizer configuration info"""
-    print(f"🔧 TOKENIZER DEBUG INFO:")
-    print(f"  Vocab size: {len(tokenizer)}")
-    print(f"  Pad token: '{tokenizer.pad_token}' (id: {tokenizer.pad_token_id})")
-    print(f"  EOS token: '{tokenizer.eos_token}' (id: {tokenizer.eos_token_id})")
-    print(f"  UNK token: '{tokenizer.unk_token}' (id: {tokenizer.unk_token_id})")
+    if master_process:
+        print(f"🔧 TOKENIZER DEBUG INFO:")
+        print(f"  Vocab size: {len(tokenizer)}")
+        print(f"  Pad token: '{tokenizer.pad_token}' (id: {tokenizer.pad_token_id})")
+        print(f"  EOS token: '{tokenizer.eos_token}' (id: {tokenizer.eos_token_id})")
+        print(f"  UNK token: '{tokenizer.unk_token}' (id: {tokenizer.unk_token_id})")
 
-    # ✅ Verify sentinel tokens
-    try:
-        sentinel_test = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-        print(f"  Sentinel <extra_id_0>: {sentinel_test}")
-    except:
-        print(f"  ⚠️ Could not find <extra_id_0> token!")
+        # ✅ Verify sentinel tokens
+        try:
+            sentinel_test = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+            print(f"  Sentinel <extra_id_0>: {sentinel_test}")
+        except:
+            print(f"  ⚠️ Could not find <extra_id_0> token!")
 
-    print(f"🎯 MODEL CONFIG:")
-    print(f"  decoder_start_token_id: {tokenizer.eos_token_id} (should match EOS)")
+        print(f"🎯 MODEL CONFIG:")
+        print(f"  decoder_start_token_id: {tokenizer.eos_token_id} (should match EOS)")
 
 # ===============================================================================
 # MODEL UTILITIES

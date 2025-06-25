@@ -22,11 +22,11 @@ os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
 init_from = 'resume' # Bắt buộc phải resume từ model đã pre-trained
 data_path = "/kaggle/input/vietnamese-legal-finetune-dataset" # Nơi chứa file finetune.json
 finetune_file_name = "dataset.json"
-out_dir = '/kaggle/working/vilegaljere' # Thư mục chứa checkpoint pre-trained
+out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 3e-5 # Higher learning rate for fine-tuning stability
+learning_rate = 1e-4 # Higher learning rate for fine-tuning stability
 max_iters = 3000     # Sufficient iterations for fine-tuning convergence
 batch_size = 16      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 4  # Maintain effective batch size of 64
@@ -99,15 +99,15 @@ from utils import (
     test_model_generation
 )
 
-# Initialize tokenizer with domain tokens
-tokenizer = load_custom_tokenizer()
-
 # Get current date and job ID
 current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
 job_id = os.environ.get('SLURM_JOB_ID', '0')
 
 # DDP setup using utils
 ddp, master_process, seed_offset, world_size, device = setup_distributed_training(backend)
+
+# Initialize tokenizer with domain tokens (after master_process is defined)
+tokenizer = load_custom_tokenizer(master_process)
 
 # Calculate total tokens
 tokens_per_iter = batch_size * (max_source_length + max_target_length) * gradient_accumulation_steps * world_size
@@ -156,14 +156,18 @@ def load_finetune_data():
     return processed_data
 
 # Load data for fine-tuning
-print("Loading fine-tuning data...")
+if master_process:
+    print("Loading fine-tuning data...")
+
 all_data = load_finetune_data()
 
 # Split train/val
 split_idx = int(0.9 * len(all_data))
 train_data = all_data[:split_idx]
 val_data = all_data[split_idx:]
-print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
+
+if master_process:
+    print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
 def get_batch(split):
     """Get batch for fine-tuning with structured input/output"""
@@ -252,7 +256,7 @@ model_args = dict(
 )
 
 # Print tokenizer info using utils
-print_tokenizer_info(tokenizer)
+print_tokenizer_info(tokenizer, master_process)
 
 # Initialize tracking variables
 iter_num = 0
@@ -261,16 +265,16 @@ best_val_loss = 1e9
 # --- FIXED MODEL INITIALIZATION WITH PROPER EMBEDDING RESIZE ---
 if master_process:
     print(f"Resuming training from {out_dir}")
-    
-    # Check if checkpoint directory exists
-    if not os.path.exists(out_dir):
-        raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
 
-    # Load model from checkpoint
-    model = ViLegalJERE.from_pretrained(out_dir)
-    
-    # Setup model with tokenizer using utils
-    setup_model_with_tokenizer(model, tokenizer, master_process)
+# Check if checkpoint directory exists
+if not os.path.exists(out_dir):
+    raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
+
+# Load model from checkpoint
+model = ViLegalJERE.from_pretrained(out_dir)
+
+# Setup model with tokenizer using utils
+setup_model_with_tokenizer(model, tokenizer, master_process)
 
 model.to(device)
 
@@ -278,7 +282,8 @@ model.to(device)
 param_count = get_num_params(model, non_embedding=False)
 param_count_m = param_count / 1_000_000
 
-print(f"Model initialized with {param_count_m:.1f}M parameters")
+if master_process:
+    print(f"Model initialized with {param_count_m:.1f}M parameters")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
@@ -352,14 +357,17 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=wandb_config)
 
 # Training loop
-print(f"Starting Fine-tuning ViLegalJERE with {param_count_m:.1f}M parameters...")
-print(f"Training data size: {len(train_data)}, Val data size: {len(val_data)}")
-print(f"Batch size: {batch_size}, Gradient accumulation: {gradient_accumulation_steps}")
-print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
-print(f"Learning rate: {learning_rate}, Max iters: {max_iters}")
+if master_process:
+    print(f"Starting Fine-tuning ViLegalJERE with {param_count_m:.1f}M parameters...")
+    print(f"Training data size: {len(train_data)}, Val data size: {len(val_data)}")
+    print(f"Batch size: {batch_size}, Gradient accumulation: {gradient_accumulation_steps}")
+    print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
+    print(f"Learning rate: {learning_rate}, Max iters: {max_iters}")
 
 input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
-print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
+
+if master_process:
+    print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -508,4 +516,5 @@ if master_process and iter_num > 100:
         
     print(f"{'='*60}")
 
-print(f"\n🎉 Fine-tuning completed! Model saved to: {finetune_dir}") 
+if master_process:
+    print(f"\n🎉 Fine-tuning completed! Model saved to: {finetune_dir}") 

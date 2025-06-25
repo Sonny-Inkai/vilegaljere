@@ -4,17 +4,10 @@ import torch.nn.functional as F
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Callable
-from transformers import PreTrainedModel, PretrainedConfig
+from transformers import T5Config  # Thêm T5Config
+from transformers.models.t5.modeling_t5 import T5ForConditionalGeneration
 
-@dataclass
-class EncoderOutput:
-    last_hidden_state: torch.Tensor
-    hidden_states: Optional[Tuple[torch.Tensor]] = None
 
-@dataclass
-class DecoderOutput:
-    logits: torch.Tensor
-    hidden_states: Optional[Tuple[torch.Tensor]] = None
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine=True):
@@ -140,9 +133,10 @@ class CPLinear(nn.Module):
 class ViLegalSelfAttention(nn.Module):
     def __init__(self, config, is_cross_attention=False, is_causal=False):
         super().__init__()
-        self.n_head = config.n_head
-        self.head_dim = config.head_dim
-        self.n_embd = config.n_embd
+        # ✅ Use T5 standard attribute names
+        self.n_head = config.num_heads  # T5 uses num_heads
+        self.head_dim = config.d_kv     # T5 uses d_kv for key/value dimension
+        self.n_embd = config.d_model    # T5 uses d_model
         self.rank = config.rank
         self.q_rank = config.q_rank
         self.is_cross_attention = is_cross_attention
@@ -161,15 +155,24 @@ class ViLegalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_head * self.head_dim, self.n_embd, bias=False)
         self.c_proj.weight.data.zero_()
         
-        self.using_groupnorm = getattr(config, 'using_groupnorm', False)
+        # ✅ Safely get using_groupnorm with default value True
+        self.using_groupnorm = getattr(config, 'using_groupnorm', True)
         if self.using_groupnorm:
             self.subln = RMSNorm(self.head_dim, eps=1e-5, elementwise_affine=True)
 
-    def forward(self, x, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None):
+    def forward(self, hidden_states, attention_mask=None, key_value_states=None, position_bias=None, past_key_value=None, layer_head_mask=None, query_length=None, use_cache=False, output_attentions=False, mask=None, **kwargs):
+        """
+        T5-compatible forward method for ViLegalSelfAttention
+        """
+        # Map T5 parameters to our parameters
+        x = hidden_states
+        encoder_hidden_states = key_value_states
+        encoder_attention_mask = mask if mask is not None else attention_mask
+        
         B, T, C = x.size()
 
         if self.is_cross_attention and encoder_hidden_states is not None:
-            # ✅ FIXED: Proper cross-attention implementation 
+            # ✅ Cross-attention: Q from decoder, K/V from encoder
             q, _, _ = self.c_q(x, apply_rope=False)  # Query from decoder input, NO RoPE
             _, k, v = self.c_kv(encoder_hidden_states, apply_rope=False)  # Key/Value from encoder, NO RoPE
             # Use encoder_attention_mask for cross-attention
@@ -180,7 +183,7 @@ class ViLegalSelfAttention(nn.Module):
             # Use attention_mask for self-attention
             mask_to_use = attention_mask
 
-        # ✅ FIXED: Proper attention mask handling
+        # ✅ Proper attention mask handling
         attn_mask_for_spda = None
         if mask_to_use is not None:
             # Convert boolean mask to additive mask for scaled_dot_product_attention
@@ -190,7 +193,7 @@ class ViLegalSelfAttention(nn.Module):
             else:
                 attn_mask_for_spda = mask_to_use == 0  # 0 = mask, 1 = keep
             
-            # Ensure proper shape for SDPA: [batch, 1, seq_len, seq_len] or [batch, heads, seq_len, seq_len]
+            # Ensure proper shape for SDPA
             if attn_mask_for_spda.dim() == 2:
                 attn_mask_for_spda = attn_mask_for_spda.unsqueeze(1).unsqueeze(1)
         
@@ -199,7 +202,7 @@ class ViLegalSelfAttention(nn.Module):
             k.transpose(1, 2),
             v.transpose(1, 2),
             attn_mask=attn_mask_for_spda,
-            is_causal=self.is_causal and not self.is_cross_attention  # ✅ No causal for cross-attention
+            is_causal=self.is_causal and not self.is_cross_attention
         )
         
         if self.using_groupnorm:
@@ -207,288 +210,101 @@ class ViLegalSelfAttention(nn.Module):
         
         y = y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_dim)
         y = self.c_proj(y)
-        return y
-
-class SwiGLU(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        hidden_dim = math.floor(8 / 3 * config.n_embd)
         
-        self.c_fc1 = nn.Linear(config.n_embd, hidden_dim, bias=False)
-        self.c_fc2 = nn.Linear(config.n_embd, hidden_dim, bias=False)
-        self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
-        self.c_proj.weight.data.zero_()
-
-    def forward(self, x):
-        x1 = self.c_fc1(x)
-        x2 = self.c_fc2(x)
-        x = F.silu(x1) * x2
-        x = self.c_proj(x)
-        return x
-
-class ViLegalEncoderBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = ViLegalSelfAttention(config, is_causal=False)
-        self.mlp = SwiGLU(config)
-        self.ln_1 = RMSNorm(config.n_embd)
-        self.ln_2 = RMSNorm(config.n_embd)
-
-    def forward(self, x, attention_mask=None):
-        x = x + self.self_attn(self.ln_1(x), attention_mask=attention_mask)
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-class ViLegalDecoderBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.self_attn = ViLegalSelfAttention(config, is_causal=True)
-        self.cross_attn = ViLegalSelfAttention(config, is_cross_attention=True)
-        self.mlp = SwiGLU(config)
-        self.ln_1 = RMSNorm(config.n_embd)
-        self.ln_2 = RMSNorm(config.n_embd)
-        self.ln_3 = RMSNorm(config.n_embd)
-
-    def forward(self, x, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None):
-        # ✅ FIXED: T5 decoder block order per Google reference
-        # 1. Self-attention (causal) - sử dụng attention_mask cho decoder tokens
-        x = x + self.self_attn(self.ln_1(x), attention_mask=attention_mask)
+        # ✅ Return T5-compatible output format
+        # T5 expects (hidden_states, attention_weights, position_bias)
+        attention_weights = None  # We don't compute attention weights
+        position_bias = None      # We don't use position bias
         
-        # 2. Cross-attention with encoder - sử dụng encoder_attention_mask cho encoder tokens
-        if encoder_hidden_states is not None:
-            x = x + self.cross_attn(
-                self.ln_2(x), 
-                encoder_hidden_states=encoder_hidden_states, 
-                encoder_attention_mask=encoder_attention_mask
-            )
-        
-        # 3. Feed-forward MLP
-        x = x + self.mlp(self.ln_3(x))
-        return x
+        if use_cache:
+            return (y, attention_weights, position_bias, past_key_value)
+        else:
+            return (y, attention_weights, position_bias)
 
-class ViLegalConfig(PretrainedConfig):
+
+
+
+
+class ViLegalConfig(T5Config):
     model_type = "vilegal_jere"
     
-    def __init__(
-        self,
-        vocab_size: int = 10100,
-        n_layer: int = 12,
-        n_head: int = 16,
-        head_dim: int = 64,
-        n_embd: int = 1024,
-        rank: int = 4,
-        q_rank: int = 8,
-        block_size: int = 2048,
-        bias: bool = False,
-        dropout: float = 0.0,
-        using_groupnorm: bool = True,
-        pad_token_id: int = 0,
-        eos_token_id: int = 3,
-        decoder_start_token_id: int = 0,
-        **kwargs
-    ):
-        self.vocab_size = vocab_size
-        self.n_layer = n_layer
-        self.n_head = n_head
-        self.head_dim = head_dim
-        self.n_embd = n_embd
+    def __init__(self, rank=4, q_rank=8, **kwargs):
+        """
+        Khởi tạo ViLegalConfig.
+        
+        Args:
+            rank (int, optional): Rank cho Key và Value trong CPLinear. Mặc định là 4.
+            q_rank (int, optional): Rank cho Query trong CPLinear. Mặc định là 8.
+            **kwargs: Tất cả các tham số tiêu chuẩn khác của T5
+                      (ví dụ: vocab_size, d_model, num_heads,...)
+                      sẽ được tự động truyền vào đây.
+        """
+        # 1. Gọi hàm __init__ của lớp cha (T5Config) trước tiên.
+        #    **kwargs sẽ tự động thu thập và truyền tất cả các tham số T5 chuẩn
+        #    (như d_model, n_head, vocab_size...) vào cho lớp cha.
+        #    Lớp cha sẽ xử lý tất cả các tham số đó cho chúng ta.
+        super().__init__(**kwargs)
+        
+        # 2. Bây giờ, chúng ta chỉ cần thêm các thuộc tính MỚI và RIÊNG BIỆT
+        #    của ViLegalJERE mà T5Config không có.
         self.rank = rank
         self.q_rank = q_rank
-        self.block_size = block_size
-        self.bias = bias
-        self.dropout = dropout
-        self.using_groupnorm = using_groupnorm
-        super().__init__(
-            pad_token_id=pad_token_id,
-            eos_token_id=eos_token_id,
-            decoder_start_token_id=decoder_start_token_id,
-            **kwargs
-        )
 
-class ViLegalJERE(PreTrainedModel):
+class ViLegalJERE(T5ForConditionalGeneration):
     config_class = ViLegalConfig
     base_model_prefix = "vilegal_jere"
     supports_gradient_checkpointing = True
 
-    def __init__(self, config):
+    def __init__(self, config: ViLegalConfig):
+        # Bước 1: Gọi hàm __init__ của lớp cha (T5ForConditionalGeneration).
+        # Lệnh 'super' này sẽ tự động xây dựng toàn bộ kiến trúc T5 chuẩn
+        # bao gồm encoder, decoder, embedding, và lm_head cho bạn.
         super().__init__(config)
-        self.config = config
-        
-        # Shared embedding
-        self.shared = nn.Embedding(config.vocab_size, config.n_embd)
-        
-        # Encoder
-        self.encoder_blocks = nn.ModuleList([
-            ViLegalEncoderBlock(config) for _ in range(config.n_layer)
-        ])
-        self.encoder_ln = RMSNorm(config.n_embd)
-        
-        # Decoder  
-        self.decoder_blocks = nn.ModuleList([
-            ViLegalDecoderBlock(config) for _ in range(config.n_layer)
-        ])
-        self.decoder_ln = RMSNorm(config.n_embd)
-        
-        # LM head
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.lm_head.weight = self.shared.weight
-        
-        self.apply(self._init_weights)
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def get_input_embeddings(self):
-        return self.shared
-
-    def set_input_embeddings(self, new_embeddings):
-        self.shared = new_embeddings
+        # Bước 2: "Độ" lại kiến trúc chuẩn bằng cách thay thế các lớp
+        # Self-Attention gốc bằng lớp ViLegalSelfAttention tùy chỉnh của bạn.
         
-    def get_output_embeddings(self):
-        return self.lm_head
+        # Vòng lặp để thay thế các khối trong Encoder
+        if hasattr(self, 'encoder'):
+            for i in range(len(self.encoder.block)):
+                # Truy cập vào lớp SelfAttention trong khối và thay thế nó
+                self.encoder.block[i].layer[0].SelfAttention = ViLegalSelfAttention(config, is_causal=False)
 
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
+        # Vòng lặp để thay thế các khối trong Decoder
+        if hasattr(self, 'decoder'):
+            for i in range(len(self.decoder.block)):
+                # Thay thế Self-Attention (lớp 0) trong khối decoder
+                self.decoder.block[i].layer[0].SelfAttention = ViLegalSelfAttention(config, is_causal=True)
+                
+                # Thay thế Cross-Attention (lớp 1) trong khối decoder
+                self.decoder.block[i].layer[1].EncDecAttention = ViLegalSelfAttention(config, is_cross_attention=True)
+
+        # Trọng số của lm_head sẽ tự động được chia sẻ với self.shared (lớp embedding)
+        # bởi hàm __init__ của lớp cha, nên chúng ta không cần làm lại.
+
+
+
+
     
     def resize_token_embeddings(self, new_num_tokens):
         """Resize token embeddings to match new vocabulary size"""
-        old_embeddings = self.get_input_embeddings()
-        if old_embeddings.num_embeddings == new_num_tokens:
-            return
-        
-        new_embeddings = nn.Embedding(new_num_tokens, old_embeddings.embedding_dim)
-        new_embeddings.to(old_embeddings.weight.device, dtype=old_embeddings.weight.dtype)
-        
-        # Copy existing embeddings
-        num_tokens_to_copy = min(old_embeddings.num_embeddings, new_num_tokens)
-        new_embeddings.weight.data[:num_tokens_to_copy, :] = old_embeddings.weight.data[:num_tokens_to_copy, :]
-        
-        # Initialize new tokens with small random values
-        if new_num_tokens > old_embeddings.num_embeddings:
-            with torch.no_grad():
-                new_embeddings.weight.data[old_embeddings.num_embeddings:, :].normal_(mean=0.0, std=0.02)
-        
-        self.set_input_embeddings(new_embeddings)
-        self.lm_head.weight = new_embeddings.weight  # Tie weights
+        # ✅ Use parent class method for robust resizing
+        new_embeddings = super().resize_token_embeddings(new_num_tokens)
         
         # Update config vocab_size
         self.config.vocab_size = new_num_tokens
+        
+        return new_embeddings
 
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        decoder_input_ids=None,
-        decoder_attention_mask=None,
-        labels=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
-        # Encoder
-        if input_ids is not None:
-            encoder_outputs = self.encode(input_ids, attention_mask, output_hidden_states)
-            encoder_hidden_states = encoder_outputs.last_hidden_state
-        else:
-            encoder_hidden_states = None
-            
-        # Decoder - ✅ FIXED: Pass attention masks correctly
-        decoder_outputs = self.decode(
-            decoder_input_ids,
-            encoder_hidden_states,
-            attention_mask=decoder_attention_mask,  # Decoder self-attention mask
-            encoder_attention_mask=attention_mask,  # Encoder cross-attention mask  
-            output_hidden_states=output_hidden_states,
-        )
-        
-        logits = decoder_outputs.logits
-        loss = None
-        
-        if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
-            
-            # ✅ FIXED: Properly mask pad tokens (id=0) to ignore in loss
-            shift_labels_masked = shift_labels.clone()
-            shift_labels_masked[shift_labels_masked == self.config.pad_token_id] = -100
-            
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels_masked.view(-1))
 
-        if not return_dict:
-            output = (logits,) + decoder_outputs[1:]
-            return ((loss,) + output) if loss is not None else output
 
-        return {
-            'loss': loss,
-            'logits': logits,
-            'encoder_last_hidden_state': encoder_hidden_states,
-            'decoder_hidden_states': decoder_outputs.hidden_states,
-        }
 
-    def encode(self, input_ids, attention_mask=None, output_hidden_states=None):
-        x = self.shared(input_ids)
-        
-        all_hidden_states = () if output_hidden_states else None
-        
-        for block in self.encoder_blocks:
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (x,)
-            x = block(x, attention_mask=attention_mask)
-            
-        x = self.encoder_ln(x)
-        
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (x,)
-            
-        return EncoderOutput(
-            last_hidden_state=x,
-            hidden_states=all_hidden_states,
-        )
 
-    def decode(
-        self,
-        input_ids,
-        encoder_hidden_states=None,
-        attention_mask=None,
-        encoder_attention_mask=None,
-        output_hidden_states=None,
-    ):
-        x = self.shared(input_ids)
-        
-        all_hidden_states = () if output_hidden_states else None
-        
-        for block in self.decoder_blocks:
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (x,)
-            x = block(
-                x,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=attention_mask,  # For decoder self-attention (causal)
-                encoder_attention_mask=encoder_attention_mask,  # For encoder cross-attention
-            )
-            
-        x = self.decoder_ln(x)
-        
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (x,)
-            
-        logits = self.lm_head(x)
-        
-        return DecoderOutput(
-            logits=logits,
-            hidden_states=all_hidden_states,
-        )
+
 
     def get_num_params(self, non_embedding=True):
+        """Return the number of parameters in the model."""
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
+        if non_embedding and hasattr(self, 'shared'):
             n_params -= self.shared.weight.numel()
         return n_params 
