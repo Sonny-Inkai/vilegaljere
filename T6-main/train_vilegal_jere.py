@@ -884,24 +884,19 @@ def test_model_generation(model, tokenizer, device):
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
     try:
-        # Generate using enhanced method
+        # Generate using standard HuggingFace method
         with torch.no_grad():
-            if hasattr(model, 'generate_relations'):
-                outputs = model.generate_relations(
-                    inputs['input_ids'],
-                    attention_mask=inputs['attention_mask'],
-                    max_length=256,
-                    num_beams=3,
-                    early_stopping=True,
-                    length_penalty=1.0
-                )
-            else:
-                # Fallback to standard generate
-                outputs = model.generate(
-                    inputs['input_ids'],
-                    attention_mask=inputs['attention_mask'],
-                    max_length=256,
-                )
+            outputs = model.generate(
+                inputs['input_ids'],
+                attention_mask=inputs['attention_mask'],
+                max_length=256,
+                num_beams=3,
+                early_stopping=True,
+                length_penalty=1.0,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
         
         # Decode result
         result = tokenizer.decode(outputs[0], skip_special_tokens=False)

@@ -61,7 +61,7 @@ def generate_relations(model, tokenizer, device, context_text, max_length=512):
         return_tensors="pt"
     ).to(device)
     
-    # Generate using the model's custom generate method
+    # Generate using the standard HuggingFace generate method
     with torch.no_grad():
         outputs = model.generate(
             input_ids=inputs['input_ids'],

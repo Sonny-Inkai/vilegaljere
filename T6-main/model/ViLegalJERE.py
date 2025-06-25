@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Callable
 from transformers import PreTrainedModel, PretrainedConfig
 
 @dataclass
@@ -165,26 +165,30 @@ class ViLegalSelfAttention(nn.Module):
         if self.using_groupnorm:
             self.subln = RMSNorm(self.head_dim, eps=1e-5, elementwise_affine=True)
 
-    def forward(self, x, encoder_hidden_states=None, attention_mask=None):
+    def forward(self, x, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None):
         B, T, C = x.size()
 
         if self.is_cross_attention and encoder_hidden_states is not None:
             # ✅ FIXED: Proper cross-attention implementation 
             q, _, _ = self.c_q(x, apply_rope=False)  # Query from decoder input, NO RoPE
             _, k, v = self.c_kv(encoder_hidden_states, apply_rope=False)  # Key/Value from encoder, NO RoPE
+            # Use encoder_attention_mask for cross-attention
+            mask_to_use = encoder_attention_mask
         else:
             # Self-attention with RoPE
             q, k, v = self.c_qkv(x, apply_rope=True)  # Apply RoPE for self-attention
+            # Use attention_mask for self-attention
+            mask_to_use = attention_mask
 
         # ✅ FIXED: Proper attention mask handling
         attn_mask_for_spda = None
-        if attention_mask is not None:
+        if mask_to_use is not None:
             # Convert boolean mask to additive mask for scaled_dot_product_attention
             # True = keep token, False = mask token
-            if attention_mask.dtype == torch.bool:
-                attn_mask_for_spda = ~attention_mask  # Invert for SDPA (True = mask)
+            if mask_to_use.dtype == torch.bool:
+                attn_mask_for_spda = ~mask_to_use  # Invert for SDPA (True = mask)
             else:
-                attn_mask_for_spda = attention_mask == 0  # 0 = mask, 1 = keep
+                attn_mask_for_spda = mask_to_use == 0  # 0 = mask, 1 = keep
             
             # Ensure proper shape for SDPA: [batch, 1, seq_len, seq_len] or [batch, heads, seq_len, seq_len]
             if attn_mask_for_spda.dim() == 2:
@@ -252,7 +256,11 @@ class ViLegalDecoderBlock(nn.Module):
         
         # 2. Cross-attention with encoder - sử dụng encoder_attention_mask cho encoder tokens
         if encoder_hidden_states is not None:
-            x = x + self.cross_attn(self.ln_2(x), encoder_hidden_states=encoder_hidden_states, attention_mask=encoder_attention_mask)
+            x = x + self.cross_attn(
+                self.ln_2(x), 
+                encoder_hidden_states=encoder_hidden_states, 
+                encoder_attention_mask=encoder_attention_mask
+            )
         
         # 3. Feed-forward MLP
         x = x + self.mlp(self.ln_3(x))
@@ -276,7 +284,7 @@ class ViLegalConfig(PretrainedConfig):
         using_groupnorm: bool = True,
         pad_token_id: int = 0,
         eos_token_id: int = 3,
-        decoder_start_token_id: int = 3,
+        decoder_start_token_id: int = 0,
         **kwargs
     ):
         self.vocab_size = vocab_size
@@ -478,246 +486,6 @@ class ViLegalJERE(PreTrainedModel):
             logits=logits,
             hidden_states=all_hidden_states,
         )
-
-    def generate(
-        self,
-        input_ids,
-        attention_mask=None,
-        max_length=512,
-        do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
-        pad_token_id=None,
-        eos_token_id=None,
-    ):
-        # ✅ FIXED: Handle None values properly by falling back to config
-        pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
-        decoder_start_token_id = self.config.decoder_start_token_id
-        
-        # Fallback to sensible defaults if config values are somehow still None
-        if pad_token_id is None:
-            pad_token_id = 0
-        if eos_token_id is None:
-            eos_token_id = 3
-        if decoder_start_token_id is None:
-            decoder_start_token_id = eos_token_id
-        
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
-        
-        # Encode input
-        encoder_outputs = self.encode(input_ids, attention_mask)
-        encoder_hidden_states = encoder_outputs.last_hidden_state
-        
-        # Initialize decoder input with proper token type
-        decoder_input_ids = torch.full((batch_size, 1), decoder_start_token_id, dtype=torch.long, device=device)
-        
-        # Generate tokens
-        for _ in range(max_length - 1):
-            decoder_outputs = self.decode(
-                decoder_input_ids,
-                encoder_hidden_states,
-                encoder_attention_mask=attention_mask
-            )
-            
-            logits = decoder_outputs.logits[:, -1, :]
-            
-            if do_sample:
-                # Apply temperature
-                logits = logits / temperature
-                
-                # Apply top-p filtering
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-                
-                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                logits[indices_to_remove] = float('-inf')
-                
-                # Sample next token
-                probs = F.softmax(logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                next_token = torch.argmax(logits, dim=-1, keepdim=True)
-            
-            decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
-            
-            # Check for EOS token
-            if (next_token == eos_token_id).all():
-                break
-                
-        return decoder_input_ids
-
-    def generate_relations(
-        self,
-        input_ids,
-        attention_mask=None,
-        max_length=512,
-        num_beams=3,
-        early_stopping=True,
-        length_penalty=1.0,
-        temperature=1.0,
-        do_sample=False,
-    ):
-        """
-        ✅ ENHANCED: Generate relation extractions with proper T5 formatting for Vietnamese Legal JERE
-        """
-        self.eval()
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
-        
-        # Handle None values with proper fallbacks
-        pad_token_id = getattr(self.config, 'pad_token_id', 0)
-        eos_token_id = getattr(self.config, 'eos_token_id', 3)
-        decoder_start_token_id = getattr(self.config, 'decoder_start_token_id', pad_token_id)
-        
-        with torch.no_grad():
-            # Encode input
-            encoder_outputs = self.encode(input_ids, attention_mask)
-            encoder_hidden_states = encoder_outputs.last_hidden_state
-            
-            # ✅ CRITICAL: Start decoder with pad token (T5 standard)
-            decoder_input_ids = torch.full(
-                (batch_size, 1), 
-                decoder_start_token_id, 
-                dtype=torch.long, 
-                device=device
-            )
-            
-            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            
-            # ✅ ENHANCED: Beam search generation for better quality
-            if num_beams > 1:
-                return self._beam_search_generation(
-                    encoder_hidden_states, attention_mask, max_length, 
-                    num_beams, length_penalty, early_stopping
-                )
-            
-            # Greedy/sampling generation
-            for step in range(max_length - 1):
-                if finished.all():
-                    break
-                    
-                decoder_outputs = self.decode(
-                    decoder_input_ids,
-                    encoder_hidden_states,
-                    encoder_attention_mask=attention_mask
-                )
-                
-                logits = decoder_outputs.logits[:, -1, :]
-                
-                # Apply temperature for sampling
-                if do_sample and temperature != 1.0:
-                    logits = logits / temperature
-                
-                # Get next tokens
-                if do_sample:
-                    # Top-k sampling for diversity
-                    top_k = min(50, logits.shape[-1])
-                    top_logits, top_indices = torch.topk(logits, top_k)
-                    probs = F.softmax(top_logits, dim=-1)
-                    next_token_idx = torch.multinomial(probs, num_samples=1)
-                    next_token = top_indices.gather(-1, next_token_idx)
-                else:
-                    # Greedy decoding
-                    next_token = torch.argmax(logits, dim=-1, keepdim=True)
-                
-                # Update sequences
-                decoder_input_ids = torch.cat([decoder_input_ids, next_token], dim=1)
-                
-                # Check for EOS
-                finished |= (next_token.squeeze(-1) == eos_token_id)
-                
-                if early_stopping and finished.any():
-                    break
-        
-        return decoder_input_ids
-    
-    def _beam_search_generation(self, encoder_hidden_states, attention_mask, max_length, num_beams, length_penalty, early_stopping):
-        """
-        ✅ SIMPLIFIED beam search implementation for relation extraction
-        """
-        batch_size = encoder_hidden_states.shape[0]
-        device = encoder_hidden_states.device
-        
-        pad_token_id = getattr(self.config, 'pad_token_id', 0)
-        eos_token_id = getattr(self.config, 'eos_token_id', 3)
-        
-        # Expand encoder outputs for beam search
-        encoder_hidden_states = encoder_hidden_states.unsqueeze(1).expand(
-            batch_size, num_beams, -1, -1
-        ).reshape(batch_size * num_beams, -1, encoder_hidden_states.shape[-1])
-        
-        if attention_mask is not None:
-            attention_mask = attention_mask.unsqueeze(1).expand(
-                batch_size, num_beams, -1
-            ).reshape(batch_size * num_beams, -1)
-        
-        # Initialize beam
-        decoder_input_ids = torch.full(
-            (batch_size * num_beams, 1), 
-            pad_token_id, 
-            dtype=torch.long, 
-            device=device
-        )
-        
-        scores = torch.zeros(batch_size * num_beams, device=device)
-        
-        for step in range(max_length - 1):
-            decoder_outputs = self.decode(
-                decoder_input_ids,
-                encoder_hidden_states,
-                encoder_attention_mask=attention_mask
-            )
-            
-            logits = decoder_outputs.logits[:, -1, :]
-            
-            # Apply length penalty
-            if step > 0:
-                scores = scores.unsqueeze(-1) + F.log_softmax(logits, dim=-1)
-                scores = scores / (step + 1) ** length_penalty
-            else:
-                scores = F.log_softmax(logits, dim=-1)
-            
-            # Get top candidates
-            vocab_size = scores.shape[-1]
-            scores = scores.view(batch_size, num_beams * vocab_size)
-            next_scores, next_tokens = torch.topk(scores, num_beams, dim=-1)
-            
-            # Convert back to beam format
-            beam_idx = next_tokens // vocab_size
-            token_idx = next_tokens % vocab_size
-            
-            # Update sequences
-            beam_idx = beam_idx.view(-1)
-            token_idx = token_idx.view(-1)
-            
-            # Gather previous sequences
-            decoder_input_ids = decoder_input_ids[beam_idx + torch.arange(
-                0, batch_size * num_beams, num_beams, device=device
-            ).unsqueeze(1).expand(-1, num_beams).view(-1)]
-            
-            # Append new tokens
-            decoder_input_ids = torch.cat([
-                decoder_input_ids, 
-                token_idx.unsqueeze(-1)
-            ], dim=-1)
-            
-            scores = next_scores.view(-1)
-            
-            # Check for early stopping
-            if early_stopping and (token_idx == eos_token_id).any():
-                break
-        
-        # Return best beam for each batch
-        best_scores, best_idx = scores.view(batch_size, num_beams).max(dim=-1)
-        best_sequences = decoder_input_ids.view(batch_size, num_beams, -1)
-        result = best_sequences[torch.arange(batch_size), best_idx]
-        
-        return result
 
     def get_num_params(self, non_embedding=True):
         n_params = sum(p.numel() for p in self.parameters())
