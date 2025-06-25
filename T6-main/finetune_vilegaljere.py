@@ -27,14 +27,14 @@ finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
 learning_rate = 1e-4 # Higher learning rate for fine-tuning stability
-max_iters = 3000     # Sufficient iterations for fine-tuning convergence
+max_iters = 1     # Sufficient iterations for fine-tuning convergence
 batch_size = 16      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 4  # Maintain effective batch size of 64
 weight_decay = 0.01  # Standard weight decay for transformer fine-tuning
-eval_interval = 100  # More frequent evaluation for monitoring
+eval_interval = 1  # More frequent evaluation for monitoring
 log_interval = 1    # Keep logging frequency
-eval_iters = 50      # Faster evaluation iterations
-warmup_iters = 300   # Shorter warmup for fine-tuning (10% of max_iters)
+eval_iters = 1      # Faster evaluation iterations
+warmup_iters = 1   # Shorter warmup for fine-tuning (10% of max_iters)
 
 # wandb logging
 wandb_log = True    # Enable for better tracking
