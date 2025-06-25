@@ -83,7 +83,7 @@ scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
 # Import ViLegalJERE model
-from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
+from model.ViLegalJERE import ViLegalJERE
 
 # Import utilities
 from utils import (

@@ -6,6 +6,22 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from datetime import datetime
+# Import ViLegalJERE model
+from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
+
+# Import utilities
+from utils import (
+    load_custom_tokenizer,
+    print_tokenizer_info,
+    get_num_params,
+    setup_model_with_tokenizer,
+    estimate_loss,
+    get_lr,
+    setup_distributed_training,
+    setup_training_environment,
+    setup_wandb,
+    qualitative_pretrain_test
+)
 
 # -----------------------------------------------------------------------------
 # -- PRE-TRAINING CONFIGURATION --
@@ -79,23 +95,6 @@ compile = False     # Disable compile for Kaggle compatibility
 scale_attn_by_inverse_layer_idx = False
 
 # -----------------------------------------------------------------------------
-
-# Import ViLegalJERE model
-from model.ViLegalJERE import ViLegalConfig, ViLegalJERE
-
-# Import utilities
-from utils import (
-    load_custom_tokenizer,
-    print_tokenizer_info,
-    get_num_params,
-    setup_model_with_tokenizer,
-    estimate_loss,
-    get_lr,
-    setup_distributed_training,
-    setup_training_environment,
-    setup_wandb,
-    qualitative_pretrain_test
-)
 
 # Initialize tokenizer with domain tokens
 tokenizer = load_custom_tokenizer()
