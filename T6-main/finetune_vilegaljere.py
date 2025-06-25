@@ -34,7 +34,7 @@ weight_decay = 0.01  # Standard weight decay for transformer fine-tuning
 eval_interval = 1  # More frequent evaluation for monitoring
 log_interval = 1    # Keep logging frequency
 eval_iters = 1      # Faster evaluation iterations
-warmup_iters = 1   # Shorter warmup for fine-tuning (10% of max_iters)
+warmup_iters = 300   # Shorter warmup for fine-tuning (10% of max_iters)
 
 # wandb logging
 wandb_log = True    # Enable for better tracking
