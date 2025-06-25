@@ -41,13 +41,13 @@ out_dir = '/kaggle/working/vilegaljere'
 
 # ✅ OPTIMIZED: Hyperparameters for pre-training on T4x2
 learning_rate = 3e-4  # Standard for T5-small pre-training
-max_iters = 10000     # Reasonable for T5-small
+max_iters = 1     # Reasonable for T5-small
 batch_size = 32       # Safe for T4 memory
 gradient_accumulation_steps = 4   # Maintain large effective batch
 weight_decay = 1e-2   # Standard T5 weight decay
-eval_interval = 500   # Less frequent for pre-training
+eval_interval = 1   # Less frequent for pre-training
 log_interval = 1     # Reduce logging overhead
-eval_iters = 200      # Keep reasonable for evaluation
+eval_iters = 1      # Keep reasonable for evaluation
 warmup_iters = 1000   # 10% of max_iters
 
 # wandb logging
