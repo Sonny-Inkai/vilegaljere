@@ -131,13 +131,12 @@ def estimate_loss(model, get_batch_fn, eval_iters, ctx):
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch_fn(split)
+            input_ids, labels, attention_mask = get_batch_fn(split)
             with ctx:
+                # ✅ T5 STANDARD: Only pass input_ids, attention_mask, and labels
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    decoder_input_ids=decoder_input_ids,
-                    decoder_attention_mask=decoder_attention_mask,
                     labels=labels
                 )
                 loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
@@ -266,7 +265,7 @@ def test_model_generation(model, tokenizer, device, master_process=True):
             outputs = model.generate(
                 inputs['input_ids'],
                 attention_mask=inputs['attention_mask'],
-                max_length=256,
+                max_length=512,
                 num_beams=3,
                 early_stopping=True,
                 length_penalty=1.0,
@@ -316,11 +315,18 @@ def qualitative_pretrain_test(model, tokenizer, device, test_sentence, create_sp
     # Use the provided create_spans_fn or try to import it
     if create_spans_fn is not None:
         try:
-            input_ids_list, target_ids_list = create_spans_fn(article_tokens)
+            # ✅ SỬA ĐỔI: create_t5_spans giờ cần tokenizer parameter và trả về strings
+            input_string, target_string = create_spans_fn(article_tokens, tokenizer)
+            
+            # Convert strings back to IDs for display purposes
+            input_ids_list = tokenizer.encode(input_string, add_special_tokens=False)
+            target_ids_list = tokenizer.encode(target_string, add_special_tokens=False)
         except Exception as e:
             print(f"⚠️ Span creation failed: {e}, using original tokens")
             input_ids_list = article_tokens
             target_ids_list = article_tokens
+            input_string = tokenizer.decode(article_tokens)
+            target_string = tokenizer.decode(article_tokens)
     else:
         # Try to import create_t5_spans from the global scope
         try:
@@ -330,23 +336,29 @@ def qualitative_pretrain_test(model, tokenizer, device, test_sentence, create_sp
             frame = sys._getframe(1)
             if 'create_t5_spans' in frame.f_globals:
                 create_t5_spans = frame.f_globals['create_t5_spans']
-                input_ids_list, target_ids_list = create_t5_spans(article_tokens)
+                input_string, target_string = create_t5_spans(article_tokens, tokenizer)
+                input_ids_list = tokenizer.encode(input_string, add_special_tokens=False)
+                target_ids_list = tokenizer.encode(target_string, add_special_tokens=False)
             else:
                 # Simple fallback - just use the original tokens
                 input_ids_list = article_tokens
                 target_ids_list = article_tokens
+                input_string = tokenizer.decode(article_tokens)
+                target_string = tokenizer.decode(article_tokens)
         except:
             # Fallback if import fails
             input_ids_list = article_tokens
             target_ids_list = article_tokens
+            input_string = tokenizer.decode(article_tokens)
+            target_string = tokenizer.decode(article_tokens)
 
     # 2. Prepare input for the model with proper attention mask
     input_ids = torch.tensor([input_ids_list], dtype=torch.long).to(device)
     attention_mask = (input_ids != tokenizer.pad_token_id).to(device)
     
     # 3. Decode to see what the masked input and expected target look like
-    corrupted_input_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-    expected_target_text = tokenizer.decode(target_ids_list, skip_special_tokens=False)
+    corrupted_input_text = input_string
+    expected_target_text = target_string
     print(f"❓ Masked Input: {corrupted_input_text}")
     print(f"🎯 Expected Target: {expected_target_text}")
 
@@ -357,7 +369,7 @@ def qualitative_pretrain_test(model, tokenizer, device, test_sentence, create_sp
             generated_ids = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
-                max_length=100,
+                max_length=512,
                 do_sample=False,  # Greedy decoding for deterministic results
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id

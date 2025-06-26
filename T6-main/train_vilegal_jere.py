@@ -887,16 +887,16 @@ def test_model_generation(model, tokenizer, device):
         # Generate using standard HuggingFace method
         with torch.no_grad():
             outputs = model.generate(
-                inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                max_length=256,
-                num_beams=3,
-                early_stopping=True,
+                    inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_length=256,
+                    num_beams=3,
+                    early_stopping=True,
                 length_penalty=1.0,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id
-            )
+                )
         
         # Decode result
         result = tokenizer.decode(outputs[0], skip_special_tokens=False)

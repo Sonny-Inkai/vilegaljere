@@ -200,22 +200,21 @@ def create_noise_mask(length, noise_density, mean_noise_span_length):
     
     return mask[:length]
 
-def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
+def create_t5_spans(tokens, tokenizer, noise_density=0.15, mean_noise_span_length=3.0):
     """
-    Create T5 span corruption that is ALGORITHMICALLY CORRECT like Google's T5
-    and COMPATIBLE with Hugging Face's T5Tokenizer that has added tokens.
+    SỬA ĐỔI: Create T5 span corruption that returns STRING instead of token lists
+    This allows tokenizer to handle batch processing efficiently
     """
     import numpy as np
     
     num_tokens = len(tokens)
     if num_tokens <= 1:
-        return tokens, [tokenizer.eos_token_id]
+        return "", ""
 
     noise_mask = create_noise_mask(num_tokens, noise_density, mean_noise_span_length)
     
     # ✅ CÁCH LÀM ĐÚNG VÀ BỀN VỮNG:
     # Tìm ID của sentinel token một cách tường minh, không phụ thuộc vào vocab_size.
-    # Cách làm này sẽ không bao giờ sai, kể cả khi bạn thêm token mới.
     sentinel_base_id = tokenizer.convert_tokens_to_ids('<extra_id_0>') 
     
     input_ids = []
@@ -241,7 +240,11 @@ def create_t5_spans(tokens, noise_density=0.15, mean_noise_span_length=3.0):
     
     labels.append(tokenizer.eos_token_id)
     
-    return input_ids, labels
+    # ✅ SỬA ĐỔI: Decode list các ID thành string để tokenizer có thể xử lý batch
+    input_string = tokenizer.decode(input_ids, skip_special_tokens=False)
+    labels_string = tokenizer.decode(labels, skip_special_tokens=False)
+    
+    return input_string, labels_string
 
 # Load data for pre-training
 if master_process:
@@ -261,62 +264,75 @@ if master_process:
     print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
 def get_batch(split):
-    """Get batch for pre-training with T5 span corruption"""
+    """
+    ✅ TỐI ƯU HÓA: Get batch for pre-training with T5 span corruption
+    Giờ đây tận dụng tokenizer để xử lý cả batch - hiệu quả và chuẩn hơn
+    """
     data = train_data if split == 'train' else val_data
     if not data:
         raise ValueError(f"Data split '{split}' is empty. Check data loading.")
 
-    batch_input_ids = []
-    batch_labels = []
+    # 1. Lấy ra một batch các bài luật (dạng string)
+    ix = np.random.randint(len(data), size=(batch_size,))
+    articles = [data[i] for i in ix]
     
-    for _ in range(batch_size):
-        # Get random article text
-        article_text = data[np.random.randint(len(data))]
-        
-        # ✅ Tokenize the preprocessed text
-        article_tokens = tokenizer.encode(article_text, truncation=True, max_length=block_size, add_special_tokens=False)
-        
+    # 2. Tạo các cặp (input bị nhiễu, target) dưới dạng STRING
+    input_strings = []
+    label_strings = []
     
+    for article_text in articles:
+        # Tokenize article
+        article_tokens = tokenizer.encode(
+            article_text, 
+            truncation=True, 
+            max_length=block_size, 
+            add_special_tokens=False
+        )
         
-        input_tokens, target_tokens = create_t5_spans(article_tokens)
+        # Create T5 spans (returns strings now)
+        input_string, label_string = create_t5_spans(article_tokens, tokenizer)
         
-        # Pad/truncate to fixed lengths
-        input_padded = (input_tokens[:max_source_length] + 
-                      [tokenizer.pad_token_id] * max(0, max_source_length - len(input_tokens)))[:max_source_length]
-        labels_padded = (target_tokens[:max_target_length] + 
-                       [tokenizer.pad_token_id] * max(0, max_target_length - len(target_tokens)))[:max_target_length]
-        
-        batch_input_ids.append(input_padded)
-        batch_labels.append(labels_padded)
+        if input_string and label_string:
+            input_strings.append(input_string)
+            label_strings.append(label_string)
     
-    # Convert to tensors
-    input_ids = torch.tensor(batch_input_ids, dtype=torch.long)
-    labels = torch.tensor(batch_labels, dtype=torch.long)
+    # 3. ✅ CHUẨN T5: Dùng tokenizer để xử lý cả batch (nhanh và hiệu quả)
+    # Giống hệt như trong finetune_vilegaljere.py
+    input_encodings = tokenizer(
+        input_strings,
+        padding="max_length",
+        max_length=max_source_length,
+        truncation=True,
+        return_tensors="pt"
+    )
     
-    # Create attention masks
-    attention_mask = (input_ids != tokenizer.pad_token_id)
+    target_encodings = tokenizer(
+        label_strings,
+        padding="max_length", 
+        max_length=max_target_length,
+        truncation=True,
+        return_tensors="pt"
+    )
     
-    # ✅ FIXED: Proper T5 decoder input - start with pad token, then shift targets right
-    decoder_start_token = tokenizer.pad_token_id  # T5 uses pad token as decoder start
-    decoder_input_ids = torch.full((labels.shape[0], 1), decoder_start_token, dtype=torch.long)
-    decoder_input_ids = torch.cat([decoder_input_ids, labels[:, :-1]], dim=-1)
-    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id)
+    input_ids = input_encodings.input_ids
+    attention_mask = input_encodings.attention_mask
+    labels = target_encodings.input_ids
+    
+    # ✅ T5 STANDARD: Replace padding token ids in labels with -100
+    # Following exact T5 documentation method
+    labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
 
     # ✅ EFFICIENT GPU transfer
     if device_type == 'cuda':
         input_ids = input_ids.pin_memory().to(device, non_blocking=True)
         labels = labels.pin_memory().to(device, non_blocking=True)
         attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
     else:
         input_ids = input_ids.to(device)
         labels = labels.to(device) 
         attention_mask = attention_mask.to(device)
-        decoder_attention_mask = decoder_attention_mask.to(device)
-        decoder_input_ids = decoder_input_ids.to(device)
     
-    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
+    return input_ids, labels, attention_mask
 
 # Model initialization arguments - T5 standard format
 model_args = dict(
@@ -457,10 +473,10 @@ if master_process:
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
     print(f"Learning rate: {learning_rate}, Max iters: {max_iters}")
 
-input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
+input_ids, labels, attention_mask = get_batch('train')
 
 if master_process:
-    print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
+    print(f"First batch shapes - Input: {input_ids.shape}, Labels: {labels.shape}")
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -512,18 +528,18 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
+            # ✅ T5 STANDARD: Only pass input_ids, attention_mask, and labels
+            # T5 automatically creates decoder_input_ids from labels
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
                 labels=labels
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
             loss = loss / gradient_accumulation_steps
         
         # Get next batch
-        input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
+        input_ids, labels, attention_mask = get_batch('train')
         scaler.scale(loss).backward()
 
     # Gradient clipping

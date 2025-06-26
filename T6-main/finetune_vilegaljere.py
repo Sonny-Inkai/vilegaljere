@@ -183,76 +183,71 @@ def get_batch(split):
     source_texts = [pair[0] for pair in batch_pairs]
     target_texts = [pair[1] for pair in batch_pairs]
     
-    # ✅ PROPER T5 tokenization with appropriate max lengths
-    input_encodings = tokenizer(
-        source_texts, 
-        padding=True, 
-        truncation=True, 
-        max_length=max_source_length, 
-        return_tensors="pt",
-        add_special_tokens=True
+    # ✅ T5 STANDARD: Follow exact T5 documentation format
+    # Encode inputs exactly like T5 docs
+    input_encoding = tokenizer(
+        source_texts,
+        padding='longest',
+        max_length=max_source_length,
+        truncation=True,
+        return_tensors="pt"
     )
+    input_ids = input_encoding.input_ids
+    attention_mask = input_encoding.attention_mask
     
-    target_encodings = tokenizer(
-        target_texts, 
-        padding=True, 
-        truncation=True, 
-        max_length=max_target_length, 
-        return_tensors="pt",
-        add_special_tokens=True
+    # Encode targets exactly like T5 docs  
+    target_encoding = tokenizer(
+        target_texts,
+        padding='longest',
+        max_length=max_target_length,
+        truncation=True
     )
+    labels = target_encoding.input_ids
     
-    input_ids = input_encodings.input_ids
-    attention_mask = input_encodings.attention_mask.to(torch.bool)
-    labels = target_encodings.input_ids
-    
-    # ✅ CRITICAL FIX: Proper T5 decoder input construction
-    # T5 decoder starts with pad token, then target sequence (shifted right)
-    decoder_input_ids = torch.full((labels.shape[0], 1), tokenizer.pad_token_id, dtype=torch.long)
-    decoder_input_ids = torch.cat([decoder_input_ids, labels[:, :-1]], dim=-1)
-    
-    # ✅ PROPER decoder attention mask
-    decoder_attention_mask = (decoder_input_ids != tokenizer.pad_token_id)
+    # ✅ T5 STANDARD: Replace padding token ids with -100 (exact T5 docs method)
+    # From docs: "replace padding token id's of the labels by -100"
+    labels = [
+        [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] 
+        for labels_example in labels
+    ]
+    labels = torch.tensor(labels)
     
     # ✅ ENHANCED: Debug info for fine-tuning
     if master_process and np.random.random() < 0.01:  # 1% chance to show debug
         print(f"\n🔍 BATCH DEBUG INFO:")
         print(f"📥 Sample input: {tokenizer.decode(input_ids[0][:50])}")
-        print(f"🎯 Sample target: {tokenizer.decode(labels[0][:50])}")
-        print(f"🔄 Sample decoder_input: {tokenizer.decode(decoder_input_ids[0][:50])}")
+        # Don't decode labels with -100 tokens, use original target_encoding instead  
+        print(f"🎯 Sample target: {tokenizer.decode(target_encoding.input_ids[0][:50])}")
 
     # ✅ EFFICIENT GPU transfer
     if device_type == 'cuda':
         input_ids = input_ids.pin_memory().to(device, non_blocking=True)
         labels = labels.pin_memory().to(device, non_blocking=True)
         attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_attention_mask = decoder_attention_mask.pin_memory().to(device, non_blocking=True)
-        decoder_input_ids = decoder_input_ids.pin_memory().to(device, non_blocking=True)
     else:
         input_ids = input_ids.to(device)
         labels = labels.to(device) 
         attention_mask = attention_mask.to(device)
-        decoder_attention_mask = decoder_attention_mask.to(device)
-        decoder_input_ids = decoder_input_ids.to(device)
     
-    return input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask
+    return input_ids, labels, attention_mask
 
-# Model initialization arguments
+# Model initialization arguments - T5 standard format  
 model_args = dict(
-    n_layer=n_layer, 
-    n_head=n_head, 
-    n_embd=n_embd, 
-    block_size=block_size,
-    bias=bias, 
-    head_dim=head_dim, 
-    rank=rank, 
-    q_rank=q_rank, 
-    using_groupnorm=using_groupnorm,
-    vocab_size=len(tokenizer),  # Use actual tokenizer size after adding special tokens
-    dropout=dropout,
-    pad_token_id=tokenizer.pad_token_id,      # 0 - Correct
-    eos_token_id=tokenizer.eos_token_id,      # 3 - Correct (not 1!)
-    decoder_start_token_id=tokenizer.pad_token_id  
+    # ✅ T5 standard parameters
+    vocab_size=len(tokenizer),
+    d_model=n_embd,  # T5 uses d_model instead of n_embd
+    num_layers=n_layer,  # T5 uses num_layers instead of n_layer  
+    num_heads=n_head,  # T5 uses num_heads instead of n_head
+    d_kv=head_dim,  # T5 uses d_kv for key/value dimension
+    d_ff=4 * n_embd,  # T5 feed-forward dimension
+    dropout_rate=dropout,  # T5 uses dropout_rate instead of dropout
+    pad_token_id=tokenizer.pad_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    decoder_start_token_id=tokenizer.pad_token_id,
+    
+    # ✅ ViLegal custom parameters
+    rank=rank,
+    q_rank=q_rank,
 )
 
 # Print tokenizer info using utils
@@ -364,10 +359,10 @@ if master_process:
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
     print(f"Learning rate: {learning_rate}, Max iters: {max_iters}")
 
-input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
+input_ids, labels, attention_mask = get_batch('train')
 
 if master_process:
-    print(f"First batch shapes - Input: {input_ids.shape}, Decoder: {decoder_input_ids.shape}, Labels: {labels.shape}")
+    print(f"First batch shapes - Input: {input_ids.shape}, Labels: {labels.shape}")
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -430,19 +425,18 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
-            # ✅ FIXED: Pass encoder attention mask correctly for T5 architecture
+            # ✅ T5 STANDARD: Only pass input_ids, attention_mask, and labels
+            # T5 automatically creates decoder_input_ids from labels
             outputs = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,  # Encoder attention mask
-                decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,  # Decoder attention mask
+                attention_mask=attention_mask,
                 labels=labels
             )
             loss = outputs['loss'] if isinstance(outputs, dict) else outputs.loss
             loss = loss / gradient_accumulation_steps
         
         # Get next batch
-        input_ids, decoder_input_ids, labels, attention_mask, decoder_attention_mask = get_batch('train')
+        input_ids, labels, attention_mask = get_batch('train')
         scaler.scale(loss).backward()
 
     # Gradient clipping

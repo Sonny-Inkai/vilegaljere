@@ -293,7 +293,7 @@ class ViLegalJERE(T5ForConditionalGeneration):
         
         # Update config vocab_size
         self.config.vocab_size = new_num_tokens
-        
+
         return new_embeddings
 
 
