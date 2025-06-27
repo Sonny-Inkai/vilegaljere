@@ -1,17 +1,18 @@
-from transformers import T5Tokenizer
+from transformers import AutoTokenizer
 
 # Khởi tạo tokenizer T5 từ một mô hình đã được huấn luyện trước (ví dụ: 't5-small')
-tokenizer = T5Tokenizer.from_pretrained('t5-small')
+tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
 
 # Chuỗi văn bản đầu vào chứa các token đặc biệt
-text = "The <extra_id_0> walks in <extra_id_1> park"
+text = "<LEGAL_PROVISION> Điều 4 01/2014/NQLT/CP-UBTƯMTTQVN<LEGAL_PROVISION> pháp luật về hòa giải ở cơ sở<Relates_To> <LEGAL_PROVISION> Điều 4 01/2014/NQLT/CP-UBTƯMTTQVN<ORGANIZATION> Ủy ban Mặt trận Tổ quốc Việt Nam <Relates_To> <LEGAL_PROVISION> Điều 4 01/2014/NQLT/CP-UBTƯMTTQVN <ORGANIZATION> Bộ Tư pháp <Relates_To> <LEGAL_PROVISION> Điều 4 01/2014/NQLT/CP-UBTƯMTTQVN <ORGANIZATION> Ủy ban nhân dân <Relates_To>"
+text2 = "<extra_id_0> ở</s>"
 
 # Mã hóa (Encode) chuỗi văn bản
 # Việc này sẽ chuyển đổi chuỗi ký tự thành một chuỗi các ID số nguyên
-input_ids = tokenizer.encode(text)
+input_ids = tokenizer.encode(text2)
 
 # In ra các ID đã được mã hóa
-print(f"Chuỗi văn bản gốc: '{text}'")
+print(f"Chuỗi văn bản gốc: '{text2}'")
 print(f"Các ID sau khi mã hóa: {input_ids}")
 
 # Giải mã (Decode) các ID trở lại thành chuỗi văn bản

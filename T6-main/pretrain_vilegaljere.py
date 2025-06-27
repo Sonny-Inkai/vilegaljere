@@ -202,49 +202,58 @@ def create_noise_mask(length, noise_density, mean_noise_span_length):
 
 def create_t5_spans(tokens, tokenizer, noise_density=0.15, mean_noise_span_length=3.0):
     """
-    SỬA ĐỔI: Create T5 span corruption that returns STRING instead of token lists
-    This allows tokenizer to handle batch processing efficiently
+    ✅ HF CHUẨN: T5 span corruption exactly like DataCollatorForT5MLM
     """
     import numpy as np
     
     num_tokens = len(tokens)
     if num_tokens <= 1:
-        return "", ""
+        return [], []
 
+    # Use same noise mask logic as HF DataCollatorForT5MLM
     noise_mask = create_noise_mask(num_tokens, noise_density, mean_noise_span_length)
     
-    # ✅ CÁCH LÀM ĐÚNG VÀ BỀN VỮNG:
-    # Tìm ID của sentinel token một cách tường minh, không phụ thuộc vào vocab_size.
-    sentinel_base_id = tokenizer.convert_tokens_to_ids('<extra_id_0>') 
+    tokens = np.array(tokens)
+    noise_mask = np.array(noise_mask, dtype=bool)
     
-    input_ids = []
-    labels = []
+    # ✅ HF STANDARD: Create sentinel IDs exactly like DataCollatorForT5MLM
+    # Find start of each noise span
+    start_indices = noise_mask.astype(int) - np.roll(noise_mask.astype(int), 1) * noise_mask.astype(int)
+    start_indices[0] = noise_mask[0]
     
-    prev_token_is_noise = False
-    sentinel_idx = 0
+    # Create cumulative sentinel indices
+    sentinel_indices = np.where(start_indices != 0, np.cumsum(start_indices), start_indices)
     
-    for i, token in enumerate(tokens):
-        is_noise = noise_mask[i] if i < len(noise_mask) else False
-        
-        if is_noise:
-            if not prev_token_is_noise:
-                sentinel_id = sentinel_base_id - sentinel_idx
-                input_ids.append(sentinel_id)
-                labels.append(sentinel_id)
-                sentinel_idx += 1
-            labels.append(token)
-        else:
-            input_ids.append(token)
-            
-        prev_token_is_noise = is_noise
+    # Get sentinel token IDs (extra_id_0, extra_id_1, ...)
+    sentinel_base_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
+    input_sentinel_ids = np.where(sentinel_indices != 0, (sentinel_base_id - sentinel_indices + 1), 0)
     
-    labels.append(tokenizer.eos_token_id)
+    # Remove consecutive masks after first sentinel
+    input_sentinel_ids = input_sentinel_ids - noise_mask.astype(int) + start_indices
     
-    # ✅ SỬA ĐỔI: Decode list các ID thành string để tokenizer có thể xử lý batch
-    input_string = tokenizer.decode(input_ids, skip_special_tokens=False)
-    labels_string = tokenizer.decode(labels, skip_special_tokens=False)
+    # Create input: original tokens with noise spans replaced by sentinels
+    input_ids_full = np.where(input_sentinel_ids != 0, input_sentinel_ids, tokens)
+    # Keep only non-negative values (removes -1 markers)
+    input_ids = input_ids_full[input_ids_full >= 0]
     
-    return input_string, labels_string
+    # Create labels: sentinels followed by the original noise tokens
+    labels_mask = ~noise_mask  # Invert for labels
+    labels_start_indices = noise_mask.astype(int) - np.roll(noise_mask.astype(int), 1) * noise_mask.astype(int)
+    labels_start_indices[0] = noise_mask[0]
+    
+    labels_sentinel_indices = np.where(labels_start_indices != 0, np.cumsum(labels_start_indices), labels_start_indices)
+    labels_sentinel_ids = np.where(labels_sentinel_indices != 0, (sentinel_base_id - labels_sentinel_indices + 1), 0)
+    
+    # For labels: include sentinels and noise tokens, exclude non-noise
+    labels_full = np.where(labels_sentinel_ids != 0, labels_sentinel_ids, tokens)
+    # Keep sentinel tokens and noise tokens
+    keep_mask = (labels_sentinel_ids != 0) | noise_mask
+    labels = labels_full[keep_mask]
+    
+    # Add EOS token
+    labels = np.append(labels, tokenizer.eos_token_id)
+    
+    return input_ids.tolist(), labels.tolist()
 
 # Load data for pre-training
 if master_process:
@@ -265,22 +274,22 @@ if master_process:
 
 def get_batch(split):
     """
-    ✅ TỐI ƯU HÓA: Get batch for pre-training with T5 span corruption
-    Giờ đây tận dụng tokenizer để xử lý cả batch - hiệu quả và chuẩn hơn
+    ✅ HF CHUẨN: Get batch for pre-training working directly with token IDs
+    No decode/encode - pure token ID manipulation like HuggingFace DataCollatorForT5MLM
     """
     data = train_data if split == 'train' else val_data
     if not data:
         raise ValueError(f"Data split '{split}' is empty. Check data loading.")
 
-    # 1. Lấy ra một batch các bài luật (dạng string)
+    # 1. Sample articles and create spans
     ix = np.random.randint(len(data), size=(batch_size,))
-    articles = [data[i] for i in ix]
     
-    # 2. Tạo các cặp (input bị nhiễu, target) dưới dạng STRING
-    input_strings = []
-    label_strings = []
+    batch_input_ids = []
+    batch_labels = []
     
-    for article_text in articles:
+    for i in range(batch_size):
+        article_text = data[ix[i]]
+        
         # Tokenize article
         article_tokens = tokenizer.encode(
             article_text, 
@@ -289,37 +298,43 @@ def get_batch(split):
             add_special_tokens=False
         )
         
-        # Create T5 spans (returns strings now)
-        input_string, label_string = create_t5_spans(article_tokens, tokenizer)
+        # Create T5 spans (returns token IDs directly)
+        input_ids, labels = create_t5_spans(article_tokens, tokenizer)
         
-        if input_string and label_string:
-            input_strings.append(input_string)
-            label_strings.append(label_string)
+        if input_ids and labels:
+            batch_input_ids.append(input_ids)
+            batch_labels.append(labels)
     
-    # 3. ✅ CHUẨN T5: Dùng tokenizer để xử lý cả batch (nhanh và hiệu quả)
-    # Giống hệt như trong finetune_vilegaljere.py
-    input_encodings = tokenizer(
-        input_strings,
-        padding="max_length",
-        max_length=max_source_length,
-        truncation=True,
-        return_tensors="pt"
-    )
+    # 2. ✅ PYTORCH BUILT-IN: Use efficient pad_sequence function
+    from torch.nn.utils.rnn import pad_sequence
     
-    target_encodings = tokenizer(
-        label_strings,
-        padding="max_length", 
-        max_length=max_target_length,
-        truncation=True,
-        return_tensors="pt"
-    )
+    # Convert to tensors first
+    batch_input_tensors = [torch.tensor(seq, dtype=torch.long) for seq in batch_input_ids]
+    batch_label_tensors = [torch.tensor(seq, dtype=torch.long) for seq in batch_labels]
     
-    input_ids = input_encodings.input_ids
-    attention_mask = input_encodings.attention_mask
-    labels = target_encodings.input_ids
+    # Use PyTorch's optimized padding
+    input_ids = pad_sequence(batch_input_tensors, batch_first=True, padding_value=tokenizer.pad_token_id)
+    labels = pad_sequence(batch_label_tensors, batch_first=True, padding_value=tokenizer.pad_token_id)
+    
+    # 3. Ensure fixed lengths for T5 (truncate or pad to exact length)
+    if input_ids.size(1) > max_source_length:
+        input_ids = input_ids[:, :max_source_length]
+    elif input_ids.size(1) < max_source_length:
+        padding_needed = max_source_length - input_ids.size(1)
+        padding = torch.full((input_ids.size(0), padding_needed), tokenizer.pad_token_id, dtype=torch.long)
+        input_ids = torch.cat([input_ids, padding], dim=1)
+    
+    if labels.size(1) > max_target_length:
+        labels = labels[:, :max_target_length]
+    elif labels.size(1) < max_target_length:
+        padding_needed = max_target_length - labels.size(1)
+        padding = torch.full((labels.size(0), padding_needed), tokenizer.pad_token_id, dtype=torch.long)
+        labels = torch.cat([labels, padding], dim=1)
+    
+    # Create attention mask (1 for non-pad tokens, 0 for pad tokens)
+    attention_mask = (input_ids != tokenizer.pad_token_id).long()
     
     # ✅ T5 STANDARD: Replace padding token ids in labels with -100
-    # Following exact T5 documentation method
     labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
 
     # ✅ EFFICIENT GPU transfer

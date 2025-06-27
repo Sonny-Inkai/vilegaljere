@@ -315,12 +315,12 @@ def qualitative_pretrain_test(model, tokenizer, device, test_sentence, create_sp
     # Use the provided create_spans_fn or try to import it
     if create_spans_fn is not None:
         try:
-            # ✅ SỬA ĐỔI: create_t5_spans giờ cần tokenizer parameter và trả về strings
-            input_string, target_string = create_spans_fn(article_tokens, tokenizer)
+            # ✅ HF CHUẨN: create_t5_spans now returns token IDs directly
+            input_ids_list, target_ids_list = create_spans_fn(article_tokens, tokenizer)
             
-            # Convert strings back to IDs for display purposes
-            input_ids_list = tokenizer.encode(input_string, add_special_tokens=False)
-            target_ids_list = tokenizer.encode(target_string, add_special_tokens=False)
+            # Convert to strings for display
+            input_string = tokenizer.decode(input_ids_list, skip_special_tokens=False)
+            target_string = tokenizer.decode(target_ids_list, skip_special_tokens=False)
         except Exception as e:
             print(f"⚠️ Span creation failed: {e}, using original tokens")
             input_ids_list = article_tokens
@@ -336,9 +336,9 @@ def qualitative_pretrain_test(model, tokenizer, device, test_sentence, create_sp
             frame = sys._getframe(1)
             if 'create_t5_spans' in frame.f_globals:
                 create_t5_spans = frame.f_globals['create_t5_spans']
-                input_string, target_string = create_t5_spans(article_tokens, tokenizer)
-                input_ids_list = tokenizer.encode(input_string, add_special_tokens=False)
-                target_ids_list = tokenizer.encode(target_string, add_special_tokens=False)
+                input_ids_list, target_ids_list = create_t5_spans(article_tokens, tokenizer)
+                input_string = tokenizer.decode(input_ids_list, skip_special_tokens=False)
+                target_string = tokenizer.decode(target_ids_list, skip_special_tokens=False)
             else:
                 # Simple fallback - just use the original tokens
                 input_ids_list = article_tokens

@@ -36,7 +36,7 @@ print(f"Tổng số token đặc biệt cần thêm: {len(user_defined_symbols)}
 print("\n--- BƯỚC 3: HUẤN LUYỆN SENTENCEPIECE ---")
 
 # Kích thước từ vựng MONG MUỐN cho các token thông thường
-BASE_VOCAB_SIZE = 10000 
+BASE_VOCAB_SIZE = 15000 
 # Kích thước từ vựng CUỐI CÙNG = kích thước cơ bản + số lượng token đặc biệt
 # FINAL_VOCAB_SIZE = BASE_VOCAB_SIZE + len(user_defined_symbols)
 MODEL_TYPE = "bpe"

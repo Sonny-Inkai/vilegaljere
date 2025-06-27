@@ -48,7 +48,7 @@ def test_tokenizer():
     sentences = [
         "Điều 1: Đây là một văn bản luật.",
         "Chính phủ ban hành <LEGAL_PROVISION> số 01/1999/NĐ-CP.",
-        "Hiệu lực từ <DATE/TIME> <extra_id_5>.",
+        "Hiệu lực từ <DATE/TIME> <extra_id_5> về tổ quốcc.",
         "<ORGANIZATION> ABC phải tuân thủ."
     ]
 

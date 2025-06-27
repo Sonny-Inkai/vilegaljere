@@ -88,13 +88,17 @@ def main():
     tokenizer = load_custom_tokenizer(master_process=True)
     
     # Test text
-    text = "Điều 2 của Luật này quy định về việc thực hiện các biện pháp bảo vệ môi trường."
+    text = "Điều 2 của Luật này quy định về việc thực hiện các biện pháp bảo vệ môi trường"
     print(f"Original: {text}")
     
     # Encode
     tokens = tokenizer.encode(text, add_special_tokens=False)
+    
     print(f"Tokens: {tokens}")
+    
     print(f"Decoded: {tokenizer.decode(tokens)}")
+    atokens = tokenizer.convert_ids_to_tokens(tokens)
+    print(f"Các token tương ứng: {atokens}")
     
     # Create spans
     input_str, label_str = create_t5_spans(tokens, tokenizer, noise_density=0.15)
@@ -106,7 +110,11 @@ def main():
     label_tokens = tokenizer.encode(label_str, add_special_tokens=False)
     
     print(f"\nRe-encoded input: {input_tokens}")
+    tokens = tokenizer.convert_ids_to_tokens(input_tokens)
+    print(f"Các token tương ứng: {tokens}")
     print(f"Re-encoded label: {label_tokens}")
+    tokens = tokenizer.convert_ids_to_tokens(label_tokens)
+    print(f"Các token tương ứng: {tokens}")
     
     input_redecoded = tokenizer.decode(input_tokens, skip_special_tokens=False)
     label_redecoded = tokenizer.decode(label_tokens, skip_special_tokens=False)
