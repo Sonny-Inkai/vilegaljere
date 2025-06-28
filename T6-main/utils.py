@@ -271,7 +271,8 @@ def test_model_generation(model, tokenizer, device, master_process=True):
                 length_penalty=1.0,
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                decoder_start_token_id=tokenizer.pad_token_id
             )
         
         # Decode result

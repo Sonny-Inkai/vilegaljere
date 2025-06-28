@@ -26,9 +26,9 @@ out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint 
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 2e-4 # Higher learning rate for fine-tuning stability
+learning_rate = 1e-4 # Higher learning rate for fine-tuning stability
 max_iters = 10000     # Sufficient iterations for fine-tuning convergence
-batch_size = 16      # Smaller batch for better gradient stability
+batch_size = 32      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 4  # Maintain effective batch size of 64
 weight_decay = 0.01  # Standard weight decay for transformer fine-tuning
 eval_interval = 500  # More frequent evaluation for monitoring
@@ -200,7 +200,8 @@ def get_batch(split):
         target_texts,
         padding='longest',
         max_length=max_target_length,
-        truncation=True
+        truncation=True,
+        return_tensors="pt"
     )
     labels = target_encoding.input_ids
     
@@ -211,13 +212,6 @@ def get_batch(split):
         for labels_example in labels
     ]
     labels = torch.tensor(labels)
-    
-    # ✅ ENHANCED: Debug info for fine-tuning
-    if master_process and np.random.random() < 0.01:  # 1% chance to show debug
-        print(f"\n🔍 BATCH DEBUG INFO:")
-        print(f"📥 Sample input: {tokenizer.decode(input_ids[0][:50])}")
-        # Don't decode labels with -100 tokens, use original target_encoding instead  
-        print(f"🎯 Sample target: {tokenizer.decode(target_encoding.input_ids[0][:50])}")
 
     # ✅ EFFICIENT GPU transfer
     if device_type == 'cuda':
