@@ -135,125 +135,97 @@ def load_legal_data():
         
     return articles
 
-# ✅ T5 span corruption functions for pre-training
-def random_spans_helper(inputs_length, noise_density, mean_noise_span_length, 
-                       extra_tokens_per_span_inputs=1, extra_tokens_per_span_targets=1):
-    """Calculate input and target lengths for span corruption"""
-    def _tokens_length_to_inputs_length_targets_length(tokens_length):
-        num_noise_tokens = int(round(tokens_length * noise_density))
-        num_noise_tokens = min(max(num_noise_tokens, 1), tokens_length - 1)
-        num_noise_spans = int(round(num_noise_tokens / mean_noise_span_length))
-        num_noise_spans = max(num_noise_spans, 1)
-        num_nonnoise_tokens = tokens_length - num_noise_tokens
-        
-        # Calculate input length (original tokens - noise + sentinel tokens)
-        inputs_length = num_nonnoise_tokens + num_noise_spans * extra_tokens_per_span_inputs
-        
-        # Calculate target length (noise tokens + sentinel tokens)  
-        targets_length = num_noise_tokens + num_noise_spans * extra_tokens_per_span_targets
-        
-        return inputs_length, targets_length
-    
-    return _tokens_length_to_inputs_length_targets_length(inputs_length)
+# ✅ T5 span corruption functions for pre-training (PHIÊN BẢN CHUẨN VÀ ĐÁNG TIN CẬY)
+import numpy as np
 
-def create_noise_mask(length, noise_density, mean_noise_span_length):
-    """Create random spans noise mask like Google T5"""
-    if noise_density == 0.0:
-        return [False] * length
-    
-    # Increase length to avoid degeneracy    
-    length = max(length, 2)
-    
-    num_noise_tokens = int(round(length * noise_density))
+def create_noise_mask(length: int, noise_density: float, mean_noise_span_length: float) -> np.ndarray:
+    """Tạo noise mask theo đúng thuật toán của Google T5."""
+    num_noise_tokens = int(np.round(length * noise_density))
     num_noise_tokens = min(max(num_noise_tokens, 1), length - 1)
-    num_noise_spans = max(1, int(round(num_noise_tokens / mean_noise_span_length)))
-    num_nonnoise_tokens = length - num_noise_tokens
     
-    def random_segmentation(num_items, num_segments):
-        """Partition a sequence randomly into non-empty segments"""
-        if num_segments >= num_items:
-            return [1] * num_items
-        
-        # Create random breakpoints
-        breaks = sorted(np.random.choice(num_items - 1, num_segments - 1, replace=False))
-        breaks = [0] + [b + 1 for b in breaks] + [num_items]
-        
-        # Calculate segment lengths
-        lengths = [breaks[i+1] - breaks[i] for i in range(len(breaks) - 1)]
-        return lengths
+    num_noise_spans = int(np.round(num_noise_tokens / mean_noise_span_length))
+    num_noise_spans = max(num_noise_spans, 1)
     
-    noise_span_lengths = random_segmentation(num_noise_tokens, num_noise_spans)
-    nonnoise_span_lengths = random_segmentation(num_nonnoise_tokens, num_noise_spans)
-    
-    # Interleave spans starting with non-noise
-    interleaved_span_lengths = []
-    for i in range(num_noise_spans):
-        interleaved_span_lengths.append(nonnoise_span_lengths[i])
-        interleaved_span_lengths.append(noise_span_lengths[i])
-    
-    # Create mask
-    mask = []
-    is_noise = False
-    for span_length in interleaved_span_lengths:
-        mask.extend([is_noise] * span_length)
-        is_noise = not is_noise
-    
-    return mask[:length]
+    if num_noise_tokens >= length:
+        return np.ones(length, dtype=bool)
 
-def create_t5_spans(tokens, tokenizer, noise_density=0.15, mean_noise_span_length=3.0):
-    """
-    ✅ HF CHUẨN: T5 span corruption exactly like DataCollatorForT5MLM
-    """
-    import numpy as np
-    
-    num_tokens = len(tokens)
-    if num_tokens <= 1:
-        return [], []
+    def _random_segmentation(num_items, num_segments):
+        if num_items < num_segments:
+            return np.array([1] * num_items + [0] * (num_segments - num_items), dtype=np.int64)
 
-    # Use same noise mask logic as HF DataCollatorForT5MLM
-    noise_mask = create_noise_mask(num_tokens, noise_density, mean_noise_span_length)
+        mask_indices = np.arange(num_items - 1) < (num_segments - 1)
+        np.random.shuffle(mask_indices)
+        first_in_segment = np.pad(mask_indices, [[1, 0]])
+        segment_id = np.cumsum(first_in_segment)
+        _, segment_length = np.unique(segment_id, return_counts=True)
+        return segment_length
+
+    noise_span_lengths = _random_segmentation(num_noise_tokens, num_noise_spans)
+    num_nonnoise_tokens = length - np.sum(noise_span_lengths)
+    nonnoise_span_lengths = _random_segmentation(num_nonnoise_tokens, num_noise_spans)
     
-    tokens = np.array(tokens)
-    noise_mask = np.array(noise_mask, dtype=bool)
+    interleaved_span_lengths = np.reshape(
+        np.stack([nonnoise_span_lengths, noise_span_lengths], axis=1), [num_noise_spans * 2]
+    )
+    span_starts = np.cumsum(interleaved_span_lengths)[:-1]
+    span_start_indicator = np.zeros((length,), dtype=np.int8)
+    span_start_indicator[span_starts] = 1
+    span_num = np.cumsum(span_start_indicator)
+    is_noise = np.equal(span_num % 2, 1)
+    return is_noise
+
+def create_t5_spans(tokens: list, tokenizer) -> tuple[list, list]:
+    """
+    PHIÊN BẢN CHUẨN VÀ ĐÁNG TIN CẬY NHẤT.
+    Thực hiện T5 span corruption bằng vòng lặp Python đơn giản, dễ hiểu và chính xác.
+    """
+    noise_mask = create_noise_mask(len(tokens), 0.15, 3.0)
     
-    # ✅ HF STANDARD: Create sentinel IDs exactly like DataCollatorForT5MLM
-    # Find start of each noise span
-    start_indices = noise_mask.astype(int) - np.roll(noise_mask.astype(int), 1) * noise_mask.astype(int)
-    start_indices[0] = noise_mask[0]
-    
-    # Create cumulative sentinel indices
-    sentinel_indices = np.where(start_indices != 0, np.cumsum(start_indices), start_indices)
-    
-    # Get sentinel token IDs (extra_id_0, extra_id_1, ...)
+    # Lấy ID của sentinel token đầu tiên để làm cơ sở
     sentinel_base_id = tokenizer.convert_tokens_to_ids('<extra_id_0>')
-    input_sentinel_ids = np.where(sentinel_indices != 0, (sentinel_base_id - sentinel_indices + 1), 0)
     
-    # Remove consecutive masks after first sentinel
-    input_sentinel_ids = input_sentinel_ids - noise_mask.astype(int) + start_indices
+    input_ids_list = []
+    labels_ids_list = []
     
-    # Create input: original tokens with noise spans replaced by sentinels
-    input_ids_full = np.where(input_sentinel_ids != 0, input_sentinel_ids, tokens)
-    # Keep only non-negative values (removes -1 markers)
-    input_ids = input_ids_full[input_ids_full >= 0]
+    in_noise_span = False
+    sentinel_idx = 0
     
-    # Create labels: sentinels followed by the original noise tokens
-    labels_mask = ~noise_mask  # Invert for labels
-    labels_start_indices = noise_mask.astype(int) - np.roll(noise_mask.astype(int), 1) * noise_mask.astype(int)
-    labels_start_indices[0] = noise_mask[0]
-    
-    labels_sentinel_indices = np.where(labels_start_indices != 0, np.cumsum(labels_start_indices), labels_start_indices)
-    labels_sentinel_ids = np.where(labels_sentinel_indices != 0, (sentinel_base_id - labels_sentinel_indices + 1), 0)
-    
-    # For labels: include sentinels and noise tokens, exclude non-noise
-    labels_full = np.where(labels_sentinel_ids != 0, labels_sentinel_ids, tokens)
-    # Keep sentinel tokens and noise tokens
-    keep_mask = (labels_sentinel_ids != 0) | noise_mask
-    labels = labels_full[keep_mask]
-    
-    # Add EOS token
-    labels = np.append(labels, tokenizer.eos_token_id)
-    
-    return input_ids.tolist(), labels.tolist()
+    for i, token_id in enumerate(tokens):
+        is_noise = noise_mask[i]
+        
+        if is_noise:
+            # Nếu một token nằm trong vùng nhiễu
+            if not in_noise_span:
+                # Nếu đây là token đầu tiên của một cụm nhiễu mới
+                # 1. Đánh dấu bắt đầu một cụm nhiễu
+                in_noise_span = True
+                # 2. Lấy sentinel ID tiếp theo
+                sentinel_id = sentinel_base_id - sentinel_idx
+                # 3. Thêm sentinel ID vào cả input và labels
+                input_ids_list.append(sentinel_id)
+                labels_ids_list.append(sentinel_id)
+                sentinel_idx += 1
+            
+            # 4. Thêm token gốc (bị che) vào labels
+            labels_ids_list.append(token_id)
+            
+        else:
+            # Nếu một token không nằm trong vùng nhiễu
+            if in_noise_span:
+                # Nếu token ngay trước đó là nhiễu, đánh dấu kết thúc cụm nhiễu
+                in_noise_span = False
+            
+            # Thêm token gốc vào input
+            input_ids_list.append(token_id)
+
+    # Thêm token kết thúc chuỗi vào cuối labels
+    if not labels_ids_list:
+        # Xử lý trường hợp không có token nào bị che
+        return [], []
+    else:
+        labels_ids_list.append(tokenizer.eos_token_id)
+
+    return input_ids_list, labels_ids_list
 
 # Load data for pre-training
 if master_process:
