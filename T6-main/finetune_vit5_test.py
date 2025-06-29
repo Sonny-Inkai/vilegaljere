@@ -27,7 +27,7 @@ finetune_dir = '/kaggle/working/vit5_finetune_test'
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
 learning_rate = 5e-5    # REBEL uses 5e-5
 max_iters = 3000        # Longer training
-batch_size = 16       # Smaller batch for ViT5-base
+batch_size = 8       # Smaller batch for ViT5-base
 gradient_accumulation_steps = 2  # Maintain effective batch size of 32
 weight_decay = 0.01  
 eval_interval = 100     # More frequent eval
