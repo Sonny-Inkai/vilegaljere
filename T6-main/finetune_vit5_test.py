@@ -25,15 +25,15 @@ finetune_file_name = "dataset.json"
 finetune_dir = '/kaggle/working/vit5_finetune_test'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 3e-5 # Standard fine-tuning LR for T5
-max_iters = 2000     # Shorter test run
-batch_size = 8       # Smaller batch for ViT5-base
-gradient_accumulation_steps = 4  # Maintain effective batch size of 32
+learning_rate = 5e-5    # REBEL uses 5e-5
+max_iters = 3000        # Longer training
+batch_size = 16       # Smaller batch for ViT5-base
+gradient_accumulation_steps = 2  # Maintain effective batch size of 32
 weight_decay = 0.01  
-eval_interval = 200  
+eval_interval = 100     # More frequent eval
 log_interval = 10    
 eval_iters = 100      
-warmup_iters = 200   
+warmup_steps = 300      # 10% of max_iters
 
 # wandb logging
 wandb_log = True    
@@ -42,7 +42,7 @@ wandb_run_name = 'vit5_jere_test'
 
 # data
 max_source_length = 512  
-max_target_length = 256  # Shorter target for test
+max_target_length = 200  # Shorter like REBEL (was 256)
 
 # optimizer
 optimizer_name = 'adamw'
@@ -72,7 +72,6 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 # Import utilities (reuse từ utils.py)
 from utils import (
     get_num_params,
-    estimate_loss,
     get_lr,
     setup_distributed_training,
     setup_training_environment,
@@ -95,7 +94,7 @@ model = AutoModelForSeq2SeqLM.from_pretrained("VietAI/vit5-base")
 # Add domain-specific tokens để fair comparison
 domain_special_tokens = [
     "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
-    "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
+    "<Effective_From>", "<Applicable_In>",
     "<Relates_To>", "<Amended_By>"
 ]
 
@@ -194,9 +193,9 @@ class ViT5JEREDataset(torch.utils.data.Dataset):
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
 
-# ✅ REUSE DATA COLLATOR
+# ✅ REBEL-STYLE DATA COLLATOR
 class T5DataCollator:
-    """Standard T5 Data Collator"""
+    """REBEL-style T5 Data Collator with proper decoder_input_ids"""
     
     def __init__(self, tokenizer, pad_to_multiple_of=None):
         self.tokenizer = tokenizer
@@ -206,6 +205,7 @@ class T5DataCollator:
         input_ids = [feature["input_ids"] for feature in features]
         labels = [feature["labels"] for feature in features]
         
+        # ✅ REBEL-STYLE: Pad input_ids
         batch_input_ids = self.tokenizer.pad(
             {"input_ids": input_ids},
             padding=True,
@@ -214,6 +214,7 @@ class T5DataCollator:
             return_tensors="pt"
         )
         
+        # ✅ REBEL-STYLE: Pad labels
         batch_labels = self.tokenizer.pad(
             {"input_ids": labels},
             padding=True,
@@ -222,14 +223,23 @@ class T5DataCollator:
             return_tensors="pt"
         )
         
-        batch_labels["input_ids"] = batch_labels["input_ids"].masked_fill(
+        # ✅ REBEL KEY: Create decoder_input_ids from labels (before masking!)
+        decoder_input_ids = torch.where(
+            batch_labels["input_ids"] != self.tokenizer.pad_token_id, 
+            batch_labels["input_ids"], 
+            self.tokenizer.pad_token_id
+        )
+        
+        # ✅ REBEL-STYLE: Replace padding in labels with -100 for loss calculation
+        labels_for_loss = batch_labels["input_ids"].masked_fill(
             batch_labels["input_ids"] == self.tokenizer.pad_token_id, -100
         )
         
         return {
             "input_ids": batch_input_ids["input_ids"],
             "attention_mask": batch_input_ids["attention_mask"],
-            "labels": batch_labels["input_ids"]
+            "decoder_input_ids": decoder_input_ids,  # ✅ REBEL key addition
+            "labels": labels_for_loss
         }
 
 # ✅ CREATE DATASETS AND DATALOADERS
@@ -257,7 +267,7 @@ val_dataloader = torch.utils.data.DataLoader(
 )
 
 def get_batch(split):
-    """Get batch using DataLoader"""
+    """Get batch using DataLoader with REBEL-style decoder handling"""
     dataloader = train_dataloader if split == 'train' else val_dataloader
     
     try:
@@ -272,13 +282,15 @@ def get_batch(split):
     if device_type == 'cuda':
         input_ids = batch['input_ids'].to(device, non_blocking=True)
         attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+        decoder_input_ids = batch['decoder_input_ids'].to(device, non_blocking=True)  # ✅ REBEL addition
         labels = batch['labels'].to(device, non_blocking=True)
     else:
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
+        decoder_input_ids = batch['decoder_input_ids'].to(device)  # ✅ REBEL addition
         labels = batch['labels'].to(device)
     
-    return input_ids, labels, attention_mask
+    return input_ids, labels, attention_mask, decoder_input_ids  # ✅ Return decoder_input_ids
 
 # Move model to device
 model.to(device)
@@ -303,9 +315,9 @@ if ddp:
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-# ✅ ViT5 GENERATION TEST FUNCTION
+# ✅ ViT5 GENERATION TEST FUNCTION WITH REBEL PARAMETERS
 def test_vit5_generation(model, tokenizer, device, master_process=True):
-    """Test ViT5 model generation capability"""
+    """Test ViT5 model generation capability with REBEL-style parameters"""
     if not master_process:
         return True
         
@@ -313,9 +325,10 @@ def test_vit5_generation(model, tokenizer, device, master_process=True):
     
     # Test input (same as other tests)
     test_input = "Điều 2 01/2014/NQLT/CP-UBTƯMTTQVN hướng dẫn phối hợp thực hiện một số quy định của pháp luật về hòa giải ở cơ sở Nguyên tắc phối hợp 1. Việc phối hợp hoạt động được thực hiện trên cơ sở chức năng, nhiệm vụ, quyền hạn, bảo đảm vai trò, trách nhiệm của mỗi cơ quan, tổ chức."
+    # ✅ FIXED: Correct "Mặt trận" instead of "Mặt trần"
     expected_output = "<LEGAL_PROVISION> Điều 2 01/2014/NQLT/CP-UBTƯMTTQVN <ORGANIZATION> Mặt trận Tổ quốc Việt Nam <Relates_To>"
     
-    print("\n🧪 TESTING ViT5 MODEL:")
+    print("\n🧪 TESTING ViT5 MODEL WITH REBEL-STYLE GENERATION:")
     print(f"📥 Input: {test_input[:150]}...")
     print(f"🎯 Expected: {expected_output}")
     
@@ -324,14 +337,16 @@ def test_vit5_generation(model, tokenizer, device, master_process=True):
         inputs = tokenizer(test_input, return_tensors="pt", max_length=512, truncation=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
-        # Generate
+        # ✅ REBEL-STYLE GENERATION
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_length=256,
-                num_beams=4,
-                early_stopping=True,
-                do_sample=False,
+                max_length=200,              # REBEL length
+                early_stopping=False,       # REBEL key setting
+                length_penalty=0,           # REBEL key setting  
+                no_repeat_ngram_size=0,     # REBEL key setting
+                num_beams=4,                # REBEL beams
+                do_sample=False,            # Deterministic
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
@@ -348,13 +363,19 @@ def test_vit5_generation(model, tokenizer, device, master_process=True):
         
         print(f"🔧 Domain tokens found: {domain_tokens_found}")
         
-        # Basic success criteria
-        success = len(domain_tokens_found) > 0 and len(generated_text.strip()) > 10
+        # ✅ IMPROVED: Better success criteria
+        has_domain_tokens = len(domain_tokens_found) >= 2  # At least 2 domain tokens
+        has_content = len(generated_text.strip()) > 20     # Reasonable length
+        not_repetitive = not any(word.count(word.split()[0]) > 3 for word in [generated_text] if word.split())
+        
+        success = has_domain_tokens and has_content and not_repetitive
+        
+        print(f"✅ Domain tokens: {has_domain_tokens} | Content length: {has_content} | Not repetitive: {not_repetitive}")
         
         if success:
-            print("✅ ViT5 generation test passed!")
+            print("✅ ViT5 REBEL-style generation test passed!")
         else:
-            print("❌ ViT5 generation test failed!")
+            print("❌ ViT5 REBEL-style generation test failed!")
             
         return success
         
@@ -389,6 +410,92 @@ if wandb_log and master_process:
 iter_num = 0
 best_val_loss = 1e9
 
+# ✅ REBEL-STYLE UTILITY FUNCTIONS (moved to top)
+def shift_tokens_left(input_ids: torch.Tensor, pad_token_id: int):
+    """
+    Shift input ids one token to the left (REBEL style).
+    """
+    shifted_input_ids = input_ids.new_zeros(input_ids.shape)
+    shifted_input_ids[:, :-1] = input_ids[:, 1:].clone()
+    shifted_input_ids[:, -1] = pad_token_id
+    return shifted_input_ids
+
+def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
+    """REBEL-style label smoothed loss"""
+    if target.dim() == lprobs.dim() - 1:
+        target = target.unsqueeze(-1)
+    nll_loss = -lprobs.gather(dim=-1, index=target)
+    smooth_loss = -lprobs.sum(dim=-1, keepdim=True)
+    if ignore_index is not None:
+        pad_mask = target.eq(ignore_index)
+        nll_loss.masked_fill_(pad_mask, 0.0)
+        smooth_loss.masked_fill_(pad_mask, 0.0)
+    else:
+        nll_loss = nll_loss.squeeze(-1)
+        smooth_loss = smooth_loss.squeeze(-1)
+
+    nll_loss = nll_loss.sum()
+    smooth_loss = smooth_loss.sum()
+    eps_i = epsilon / lprobs.size(-1)
+    loss = (1.0 - epsilon) * nll_loss + eps_i * smooth_loss
+    return loss, nll_loss
+
+# ✅ REBEL-STYLE LOSS FUNCTION
+def compute_loss(model, input_ids, attention_mask, decoder_input_ids, labels, label_smoothing=0.0):
+    """REBEL-style loss computation with label smoothing support"""
+    
+    # ✅ REBEL-STYLE: Shift labels for loss calculation
+    shifted_labels = shift_tokens_left(labels, -100)
+    
+    if label_smoothing == 0.0:
+        # Standard cross entropy loss
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            labels=shifted_labels,
+        )
+        return outputs.loss
+    else:
+        # Label smoothed loss (REBEL style)
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            use_cache=False,
+        )
+        logits = outputs.logits
+        lprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+        
+        # Replace -100 with pad_token_id for label smoothing
+        smooth_labels = shifted_labels.clone()
+        smooth_labels.masked_fill_(smooth_labels == -100, tokenizer.pad_token_id)
+        
+        loss, _ = label_smoothed_nll_loss(
+            lprobs, smooth_labels, label_smoothing, 
+            ignore_index=tokenizer.pad_token_id
+        )
+        return loss
+
+@torch.no_grad()
+def estimate_loss_rebel(model, get_batch_fn, eval_iters, ctx, label_smoothing=0.0):
+    """REBEL-style estimate loss with decoder_input_ids and label smoothing"""
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            input_ids, labels, attention_mask, decoder_input_ids = get_batch_fn(split)
+            with ctx:
+                loss = compute_loss(
+                    model, input_ids, attention_mask, decoder_input_ids, 
+                    labels, label_smoothing
+                )
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
 # Training loop
 if master_process:
     print(f"🚀 Starting ViT5 Fine-tuning test...")
@@ -397,7 +504,7 @@ if master_process:
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps * world_size}")
     print(f"Learning rate: {learning_rate}, Max iters: {max_iters}")
 
-input_ids, labels, attention_mask = get_batch('train')
+input_ids, labels, attention_mask, decoder_input_ids = get_batch('train')
 
 if master_process:
     print(f"First batch shapes - Input: {input_ids.shape}, Labels: {labels.shape}")
@@ -407,15 +514,28 @@ local_iter_num = 0
 raw_model = model.module if ddp else model
 running_mfu = -1.0
 
+# ✅ REBEL-STYLE TRAINING PARAMETERS  
+label_smoothing = 0.1   # REBEL uses label smoothing
+
+# ✅ REBEL-STYLE GENERATION PARAMETERS  
+generation_config = {
+    "max_length": 200,
+    "early_stopping": False,  # REBEL key setting
+    "length_penalty": 0,      # REBEL key setting
+    "no_repeat_ngram_size": 0,  # REBEL key setting
+    "num_beams": 4,
+    "do_sample": False,
+}
+
 while True:
     # Set learning rate
-    lr = get_lr(iter_num, learning_rate, warmup_iters, lr_decay_iters, min_lr, schedule) if decay_lr else learning_rate
+    lr = get_lr(iter_num, learning_rate, warmup_steps, lr_decay_iters, min_lr, schedule) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
     # Evaluation
     if iter_num % eval_interval == 0 and master_process and iter_num > 0:
-        losses = estimate_loss(model, get_batch, eval_iters, ctx)
+        losses = estimate_loss_rebel(raw_model, get_batch, eval_iters, ctx, label_smoothing)
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             
         print(f"\n🧪 ViT5 EVALUATION (iter {iter_num})")
@@ -448,15 +568,14 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         
         with ctx:
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-            loss = outputs.loss / gradient_accumulation_steps
+            # ✅ REBEL-STYLE: Use custom loss function with label smoothing
+            loss = compute_loss(
+                model, input_ids, attention_mask, decoder_input_ids, 
+                labels, label_smoothing
+            ) / gradient_accumulation_steps
         
         # Get next batch
-        input_ids, labels, attention_mask = get_batch('train')
+        input_ids, labels, attention_mask, decoder_input_ids = get_batch('train')
         scaler.scale(loss).backward()
 
     # Gradient clipping
