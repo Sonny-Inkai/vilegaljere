@@ -40,15 +40,15 @@ data_path = "/kaggle/input/relation"  # Kaggle dataset path
 out_dir = '/kaggle/working/vilegaljere_pretrain'
 
 # ✅ OPTIMIZED: Hyperparameters for pre-training on T4x2
-learning_rate = 3e-4  # Standard for T5-small pre-training
+learning_rate = 2e-4  # Standard for T5-small pre-training
 max_iters = 15000     # Reasonable for T5-small
-batch_size = 32       # Safe for T4 memory
-gradient_accumulation_steps = 4   # Maintain large effective batch
+batch_size = 16           # Safe for T4 memory
+gradient_accumulation_steps = 2   # Maintain large effective batch
 weight_decay = 1e-2   # Standard T5 weight decay
-eval_interval = 500   # Less frequent for pre-training
+eval_interval = 300   # Less frequent for pre-training
 log_interval = 10     # Reduce logging overhead
 eval_iters = 300      # Keep reasonable for evaluation
-warmup_iters = 2000   # 10% of max_iters
+warmup_iters = 1000   # 10% of max_iters
 
 # wandb logging
 wandb_log = True
