@@ -2,6 +2,7 @@ import os
 import time
 import numpy as np
 import torch
+import torch.utils.data
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from datetime import datetime
@@ -19,22 +20,22 @@ always_save_checkpoint = True
 os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
 
 # --- CẤU HÌNH CHO FINE-TUNING ---
-init_from = 'resume' # Bắt buộc phải resume từ model đã pre-trained
+init_from = 'scratch' # 'scratch' or 'resume' - 'scratch' = T5 gốc, 'resume' = từ pre-trained checkpoint
 data_path = "/kaggle/input/vietnamese-legal-finetune-dataset" # Nơi chứa file finetune.json
 finetune_file_name = "dataset.json"
-out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained
+out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained (nếu resume)
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 1e-4 # Higher learning rate for fine-tuning stability
+learning_rate = 2e-4 # Higher learning rate for fine-tuning stability
 max_iters = 10000     # Sufficient iterations for fine-tuning convergence
-batch_size = 32      # Smaller batch for better gradient stability
-gradient_accumulation_steps = 4  # Maintain effective batch size of 64
+batch_size = 16      # Smaller batch for better gradient stability
+gradient_accumulation_steps = 2  # Maintain effective batch size of 64
 weight_decay = 0.02  # Standard weight decay for transformer fine-tuning
 eval_interval = 500  # More frequent evaluation for monitoring
 log_interval = 10    # Keep logging frequency
 eval_iters = 300      # Faster evaluation iterations
-warmup_iters = 2000   # Shorter warmup for fine-tuning (10% of max_iters)
+warmup_iters = 1000   # Shorter warmup for fine-tuning (10% of max_iters)
 
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -83,7 +84,7 @@ scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
 # Import ViLegalJERE model
-from model.ViLegalJERE import ViLegalJERE
+from model.ViLegalJERE import ViLegalJERE, ViLegalConfig
 
 # Import utilities
 from utils import (
@@ -169,59 +170,135 @@ val_data = all_data[split_idx:]
 if master_process:
     print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
+# ✅ BUILT-IN DATASET CLASS - CHUẨN PYTORCH
+class ViLegalJEREDataset(torch.utils.data.Dataset):
+    """Chuẩn PyTorch Dataset cho fine-tuning JERE"""
+    
+    def __init__(self, data, tokenizer, max_source_length, max_target_length):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_source_length = max_source_length
+        self.max_target_length = max_target_length
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        source_text, target_text = self.data[idx]
+        
+        # ✅ T5 CHUẨN: Tokenize input và target riêng biệt
+        model_inputs = self.tokenizer(
+            source_text,
+            max_length=self.max_source_length,
+            truncation=True,
+            padding=False,  # Để data collator handle padding
+        )
+        
+        # Tokenize labels
+        labels = self.tokenizer(
+            target_text,
+            max_length=self.max_target_length,
+            truncation=True,
+            padding=False,  # Để data collator handle padding
+        )
+        
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+# ✅ BUILT-IN DATA COLLATOR - CHUẨN T5
+class T5DataCollator:
+    """Chuẩn T5 Data Collator với proper padding và label masking"""
+    
+    def __init__(self, tokenizer, pad_to_multiple_of=None):
+        self.tokenizer = tokenizer
+        self.pad_to_multiple_of = pad_to_multiple_of
+    
+    def __call__(self, features):
+        # ✅ Separate input_ids và labels
+        input_ids = [feature["input_ids"] for feature in features]
+        labels = [feature["labels"] for feature in features]
+        attention_mask = [feature.get("attention_mask") for feature in features if feature.get("attention_mask") is not None]
+        
+        # ✅ CHUẨN: Pad input_ids
+        batch_input_ids = self.tokenizer.pad(
+            {"input_ids": input_ids},
+            padding=True,
+            max_length=None,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt"
+        )
+        
+        # ✅ CHUẨN: Pad labels
+        batch_labels = self.tokenizer.pad(
+            {"input_ids": labels},
+            padding=True,
+            max_length=None,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt"
+        )
+        
+        # ✅ T5 CHUẨN: Replace padding token ids với -100
+        batch_labels["input_ids"] = batch_labels["input_ids"].masked_fill(
+            batch_labels["input_ids"] == self.tokenizer.pad_token_id, -100
+        )
+        
+        return {
+            "input_ids": batch_input_ids["input_ids"],
+            "attention_mask": batch_input_ids["attention_mask"],
+            "labels": batch_labels["input_ids"]
+        }
+
+# ✅ TẠO DATASETS VÀ DATALOADERS CHUẨN
+train_dataset = ViLegalJEREDataset(train_data, tokenizer, max_source_length, max_target_length)
+val_dataset = ViLegalJEREDataset(val_data, tokenizer, max_source_length, max_target_length)
+
+# ✅ CHUẨN DATA COLLATOR
+data_collator = T5DataCollator(tokenizer)
+
+# ✅ CHUẨN PYTORCH DATALOADERS
+train_dataloader = torch.utils.data.DataLoader(
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    collate_fn=data_collator,
+    num_workers=0,  # Set to 0 for Kaggle compatibility
+    pin_memory=True if device_type == 'cuda' else False
+)
+
+val_dataloader = torch.utils.data.DataLoader(
+    val_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    collate_fn=data_collator,
+    num_workers=0,
+    pin_memory=True if device_type == 'cuda' else False
+)
+
+# ✅ BUILT-IN GET_BATCH FUNCTION CHUẨN
 def get_batch(split):
-    """Get batch for fine-tuning with structured input/output"""
-    data = train_data if split == 'train' else val_data
-    if not data:
-        raise ValueError(f"Data split '{split}' is empty. Check data loading.")
-
-    # ✅ IMPROVED FINE-TUNING BATCH PROCESSING
-    ix = np.random.randint(len(data), size=(batch_size,))
-    batch_pairs = [data[i] for i in ix]
+    """Chuẩn built-in get_batch sử dụng DataLoader"""
+    dataloader = train_dataloader if split == 'train' else val_dataloader
     
-    # Extract source and target texts
-    source_texts = [pair[0] for pair in batch_pairs]
-    target_texts = [pair[1] for pair in batch_pairs]
+    # ✅ Get next batch từ dataloader
+    try:
+        if not hasattr(get_batch, f'{split}_iter'):
+            setattr(get_batch, f'{split}_iter', iter(dataloader))
+        
+        batch = next(getattr(get_batch, f'{split}_iter'))
+    except StopIteration:
+        # ✅ Reset iterator khi hết epoch
+        setattr(get_batch, f'{split}_iter', iter(dataloader))
+        batch = next(getattr(get_batch, f'{split}_iter'))
     
-    # ✅ T5 STANDARD: Follow exact T5 documentation format
-    # Encode inputs exactly like T5 docs
-    input_encoding = tokenizer(
-        source_texts,
-        padding='longest',
-        max_length=max_source_length,
-        truncation=True,
-        return_tensors="pt"
-    )
-    input_ids = input_encoding.input_ids
-    attention_mask = input_encoding.attention_mask
-    
-    # Encode targets exactly like T5 docs  
-    target_encoding = tokenizer(
-        target_texts,
-        padding='longest',
-        max_length=max_target_length,
-        truncation=True,
-        return_tensors="pt"
-    )
-    labels = target_encoding.input_ids
-    
-    # ✅ T5 STANDARD: Replace padding token ids with -100 (exact T5 docs method)
-    # From docs: "replace padding token id's of the labels by -100"
-    labels = [
-        [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] 
-        for labels_example in labels
-    ]
-    labels = torch.tensor(labels)
-
-    # ✅ EFFICIENT GPU transfer
+    # ✅ Move to device efficiently
     if device_type == 'cuda':
-        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
-        labels = labels.pin_memory().to(device, non_blocking=True)
-        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        attention_mask = batch['attention_mask'].to(device, non_blocking=True)
+        labels = batch['labels'].to(device, non_blocking=True)
     else:
-        input_ids = input_ids.to(device)
-        labels = labels.to(device) 
-        attention_mask = attention_mask.to(device)
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['labels'].to(device)
     
     return input_ids, labels, attention_mask
 
@@ -251,19 +328,39 @@ print_tokenizer_info(tokenizer, master_process)
 iter_num = 0
 best_val_loss = 1e9
 
-# --- FIXED MODEL INITIALIZATION WITH PROPER EMBEDDING RESIZE ---
-if master_process:
-    print(f"Resuming training from {out_dir}")
+# --- MODEL INITIALIZATION GIỐNG PRETRAIN ---
+if init_from == 'scratch':
+    if master_process:
+        print("🚀 Initializing model from scratch (T5 gốc + T6 attention)")
+    config_obj = ViLegalConfig(**model_args)
+    model = ViLegalJERE(config_obj)
+    
+    # Setup model with tokenizer using utils
+    setup_model_with_tokenizer(model, tokenizer, master_process)
 
-# Check if checkpoint directory exists
-if not os.path.exists(out_dir):
-    raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
+elif init_from == 'resume':
+    if master_process:
+        print(f"🔄 Resuming training from {out_dir}")
+    
+    if not os.path.exists(out_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
 
-# Load model from checkpoint
-model = ViLegalJERE.from_pretrained(out_dir)
-
-# Setup model with tokenizer using utils
-setup_model_with_tokenizer(model, tokenizer, master_process)
+    model = ViLegalJERE.from_pretrained(out_dir)
+    
+    # Setup model with tokenizer using utils
+    setup_model_with_tokenizer(model, tokenizer, master_process)
+    
+    # Load optimizer state if available
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
+        if master_process:
+            print(f"✅ Resumed successfully from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
+    else:
+        if master_process:
+            print(f"⚠️ Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
 
 model.to(device)
 
@@ -281,12 +378,24 @@ if master_process:
 # Initialize scaler and optimizer
 scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
-# ✅ FINE-TUNING: Create fresh optimizer (không load từ pre-train)
+# ✅ OPTIMIZER HANDLING
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
 
-if master_process:
-    print("✅ Created fresh optimizer for fine-tuning (reset từ pre-train)")
+# Load optimizer state if resume and available
+if init_from == 'resume':
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        if master_process:
+            print("✅ Optimizer state loaded successfully")
+    else:
+        if master_process:
+            print("⚠️ Fresh optimizer for fine-tuning (no pre-trained optimizer found)")
+else:
+    if master_process:
+        print("✅ Fresh optimizer for fine-tuning (scratch initialization)")
 
 # Compile model
 if compile:
