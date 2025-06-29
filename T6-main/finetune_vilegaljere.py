@@ -20,10 +20,10 @@ always_save_checkpoint = True
 os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
 
 # --- CẤU HÌNH CHO FINE-TUNING ---
-init_from = 'resume' # Bắt buộc phải resume từ model đã pre-trained
+init_from = 'scratch' # 'scratch' or 'resume' - 'scratch' = T5 gốc, 'resume' = từ pre-trained checkpoint
 data_path = "/kaggle/input/vietnamese-legal-finetune-dataset" # Nơi chứa file finetune.json
 finetune_file_name = "dataset.json"
-out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained
+out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained (nếu resume)
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
@@ -84,7 +84,7 @@ scale_attn_by_inverse_layer_idx = False
 # -----------------------------------------------------------------------------
 
 # Import ViLegalJERE model
-from model.ViLegalJERE import ViLegalJERE
+from model.ViLegalJERE import ViLegalJERE, ViLegalConfig
 
 # Import utilities
 from utils import (
@@ -328,19 +328,39 @@ print_tokenizer_info(tokenizer, master_process)
 iter_num = 0
 best_val_loss = 1e9
 
-# --- FIXED MODEL INITIALIZATION WITH PROPER EMBEDDING RESIZE ---
-if master_process:
-    print(f"Resuming training from {out_dir}")
+# --- MODEL INITIALIZATION GIỐNG PRETRAIN ---
+if init_from == 'scratch':
+    if master_process:
+        print("🚀 Initializing model from scratch (T5 gốc + T6 attention)")
+    config_obj = ViLegalConfig(**model_args)
+    model = ViLegalJERE(config_obj)
+    
+    # Setup model with tokenizer using utils
+    setup_model_with_tokenizer(model, tokenizer, master_process)
 
-# Check if checkpoint directory exists
-if not os.path.exists(out_dir):
-    raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
+elif init_from == 'resume':
+    if master_process:
+        print(f"🔄 Resuming training from {out_dir}")
+    
+    if not os.path.exists(out_dir):
+        raise FileNotFoundError(f"Checkpoint directory not found: {out_dir}. Cannot resume.")
 
-# Load model from checkpoint
-model = ViLegalJERE.from_pretrained(out_dir)
-
-# Setup model with tokenizer using utils
-setup_model_with_tokenizer(model, tokenizer, master_process)
+    model = ViLegalJERE.from_pretrained(out_dir)
+    
+    # Setup model with tokenizer using utils
+    setup_model_with_tokenizer(model, tokenizer, master_process)
+    
+    # Load optimizer state if available
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
+        if master_process:
+            print(f"✅ Resumed successfully from iteration {iter_num} with best_val_loss {best_val_loss:.4f}")
+    else:
+        if master_process:
+            print(f"⚠️ Warning: optimizer.pt not found in {out_dir}. Starting optimizer from scratch.")
 
 model.to(device)
 
@@ -358,12 +378,24 @@ if master_process:
 # Initialize scaler and optimizer
 scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
-# ✅ FINE-TUNING: Create fresh optimizer (không load từ pre-train)
+# ✅ OPTIMIZER HANDLING
 from torch.optim import AdamW
 optimizer = AdamW(model.parameters(), lr=learning_rate, betas=(beta1, beta2), eps=1e-8, weight_decay=weight_decay)
 
-if master_process:
-    print("✅ Created fresh optimizer for fine-tuning (reset từ pre-train)")
+# Load optimizer state if resume and available
+if init_from == 'resume':
+    optimizer_state_path = os.path.join(out_dir, 'optimizer.pt')
+    if os.path.exists(optimizer_state_path):
+        checkpoint = torch.load(optimizer_state_path, map_location=device)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        if master_process:
+            print("✅ Optimizer state loaded successfully")
+    else:
+        if master_process:
+            print("⚠️ Fresh optimizer for fine-tuning (no pre-trained optimizer found)")
+else:
+    if master_process:
+        print("✅ Fresh optimizer for fine-tuning (scratch initialization)")
 
 # Compile model
 if compile:
