@@ -27,15 +27,15 @@ out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint 
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 3e-5 # Higher learning rate for fine-tuning stability
-max_iters = 5000     # Sufficient iterations for fine-tuning convergence
+learning_rate = 2e-4 # Higher learning rate for fine-tuning stability
+max_iters = 10000     # Sufficient iterations for fine-tuning convergence
 batch_size = 16      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 2  # Maintain effective batch size of 64
 weight_decay = 0.02  # Standard weight decay for transformer fine-tuning
-eval_interval = 100  # More frequent evaluation for monitoring
+eval_interval = 500  # More frequent evaluation for monitoring
 log_interval = 10    # Keep logging frequency
-eval_iters = 100      # Faster evaluation iterations
-warmup_iters = 500   # Shorter warmup for fine-tuning (10% of max_iters)
+eval_iters = 300      # Faster evaluation iterations
+warmup_iters = 1000   # Shorter warmup for fine-tuning (10% of max_iters)
 
 # wandb logging
 wandb_log = True    # Enable for better tracking
