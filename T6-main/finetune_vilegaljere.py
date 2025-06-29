@@ -26,16 +26,16 @@ finetune_file_name = "dataset.json"
 out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint pre-trained
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
-# ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 1e-4 # Higher learning rate for fine-tuning stability
+# ✅ ANTI-OVERFITTING: Better hyperparameters to prevent memorization
+learning_rate = 5e-5  # ✅ LOWER learning rate to prevent overfitting
 max_iters = 10000     # Sufficient iterations for fine-tuning convergence
 batch_size = 32      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 4  # Maintain effective batch size of 64
-weight_decay = 0.02  # Standard weight decay for transformer fine-tuning
+weight_decay = 0.05  # ✅ HIGHER weight decay for regularization
 eval_interval = 100  # More frequent evaluation for monitoring
 log_interval = 10    # Keep logging frequency
 eval_iters = 100      # Faster evaluation iterations
-warmup_iters = 2000   # Shorter warmup for fine-tuning (10% of max_iters)
+warmup_iters = 1000   # ✅ SHORTER warmup to prevent early overfitting
 
 # wandb logging
 wandb_log = True    # Enable for better tracking
@@ -55,7 +55,7 @@ head_dim = 64       # 512/8 = 64
 rank = 4            # Reasonable CP rank for T6
 q_rank = 8          # Reasonable query rank for T6
 n_embd = 512        # T5-small hidden size
-dropout = 0.1       # Standard dropout for T5
+dropout = 0.15      # ✅ HIGHER dropout for anti-overfitting
 bias = False
 using_groupnorm = True
 
@@ -453,14 +453,23 @@ while True:
             
         print(f"\n🧪 VIETNAMESE LEGAL JERE EVALUATION (iter {iter_num})")
         
-        # Test model generation
+        # ✅ IMPROVED: Test model generation quality
         raw_model = model.module if ddp else model
         test_success = test_model_generation(raw_model, tokenizer, device, master_process)
+        
+        # ✅ ANTI-OVERFITTING: Monitor generation quality vs loss
+        loss_ratio = losses['train'] / (losses['val'] + 1e-8)  # Train/Val loss ratio
+        is_overfitting = loss_ratio < 0.8 and losses['train'] < 0.5  # Low train loss but poor generation
         
         if test_success:
             print("✅ Model generation test passed!")
         else:
             print("❌ Model generation test failed!")
+            
+        if is_overfitting:
+            print("⚠️  WARNING: Potential overfitting detected!")
+            print(f"   Train/Val loss ratio: {loss_ratio:.3f}")
+            print("   Consider early stopping or reducing learning rate")
         
         if wandb_log:
             log_dict = {
@@ -469,23 +478,33 @@ while True:
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100,
+                "eval/generation_success": 1 if test_success else 0,
+                "eval/loss_ratio": loss_ratio,
+                "eval/overfitting_warning": 1 if is_overfitting else 0,
             }
-            
-            log_dict["eval/generation_success"] = 1 if test_success else 0
             
             wandb.log(log_dict, step=iter_num)
         
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        # ✅ IMPROVED CHECKPOINT SAVING: Consider generation quality
+        save_checkpoint = False
+        if test_success and losses['val'] < best_val_loss:
+            # Save if both generation works AND loss improved
             best_val_loss = losses['val']
-            if iter_num > 0:
-                print(f"Saving checkpoint to {finetune_dir}")
-                raw_model.save_pretrained(finetune_dir, safe_serialization=False)
-                optimizer_state = {
-                    'optimizer': optimizer.state_dict(),
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                }
-                torch.save(optimizer_state, os.path.join(finetune_dir, 'optimizer.pt'))
+            save_checkpoint = True
+            print(f"🎯 Best model so far! Loss: {best_val_loss:.4f}, Generation: ✅")
+        elif always_save_checkpoint:
+            save_checkpoint = True
+            
+        if save_checkpoint and iter_num > 0:
+            print(f"Saving checkpoint to {finetune_dir}")
+            raw_model.save_pretrained(finetune_dir, safe_serialization=False)
+            optimizer_state = {
+                'optimizer': optimizer.state_dict(),
+                'iter_num': iter_num,
+                'best_val_loss': best_val_loss,
+                'generation_success': test_success,
+            }
+            torch.save(optimizer_state, os.path.join(finetune_dir, 'optimizer.pt'))
 
     if iter_num == 0 and eval_only:
         break
