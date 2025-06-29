@@ -36,7 +36,7 @@ os.environ['WANDB_API_KEY'] = 'bcc183326224decc1f9fee116ccfd509e740fab1'
 
 # --- CẤU HÌNH CHO PRE-TRAINING ---
 init_from = 'resume' # 'scratch' or 'resume'
-data_path = "/kaggle/input/vietnamese-legal-pretrain-dataset"  # Kaggle dataset path
+data_path = "/kaggle/input/relation"  # Kaggle dataset path
 out_dir = '/kaggle/working/vilegaljere_pretrain'
 
 # ✅ OPTIMIZED: Hyperparameters for pre-training on T4x2
@@ -120,7 +120,7 @@ device_type, ctx = setup_training_environment(seed_offset, dtype)
 # Data loading for Vietnamese legal text (PRE-TRAINING)
 def load_legal_data():
     """Load preprocessed Vietnamese legal data for pre-training"""
-    data_file = os.path.join(data_path, 'dataset.txt')
+    data_file = os.path.join(data_path, 'extracted_relations.txt')
     if not os.path.exists(data_file):
         raise FileNotFoundError(f"Dataset not found at {data_file}")
     

@@ -2,7 +2,6 @@ import os
 import time
 import numpy as np
 import torch
-import torch.utils.data
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from datetime import datetime
@@ -32,9 +31,9 @@ max_iters = 10000     # Sufficient iterations for fine-tuning convergence
 batch_size = 32      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 4  # Maintain effective batch size of 64
 weight_decay = 0.02  # Standard weight decay for transformer fine-tuning
-eval_interval = 100  # More frequent evaluation for monitoring
+eval_interval = 500  # More frequent evaluation for monitoring
 log_interval = 10    # Keep logging frequency
-eval_iters = 100      # Faster evaluation iterations
+eval_iters = 300      # Faster evaluation iterations
 warmup_iters = 2000   # Shorter warmup for fine-tuning (10% of max_iters)
 
 # wandb logging
@@ -170,135 +169,59 @@ val_data = all_data[split_idx:]
 if master_process:
     print(f"Train data size: {len(train_data)}, Val data size: {len(val_data)}")
 
-# ✅ BUILT-IN DATASET CLASS - CHUẨN PYTORCH
-class ViLegalJEREDataset(torch.utils.data.Dataset):
-    """Chuẩn PyTorch Dataset cho fine-tuning JERE"""
-    
-    def __init__(self, data, tokenizer, max_source_length, max_target_length):
-        self.data = data
-        self.tokenizer = tokenizer
-        self.max_source_length = max_source_length
-        self.max_target_length = max_target_length
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        source_text, target_text = self.data[idx]
-        
-        # ✅ T5 CHUẨN: Tokenize input và target riêng biệt
-        model_inputs = self.tokenizer(
-            source_text,
-            max_length=self.max_source_length,
-            truncation=True,
-            padding=False,  # Để data collator handle padding
-        )
-        
-        # Tokenize labels
-        labels = self.tokenizer(
-            target_text,
-            max_length=self.max_target_length,
-            truncation=True,
-            padding=False,  # Để data collator handle padding
-        )
-        
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
-
-# ✅ BUILT-IN DATA COLLATOR - CHUẨN T5
-class T5DataCollator:
-    """Chuẩn T5 Data Collator với proper padding và label masking"""
-    
-    def __init__(self, tokenizer, pad_to_multiple_of=None):
-        self.tokenizer = tokenizer
-        self.pad_to_multiple_of = pad_to_multiple_of
-    
-    def __call__(self, features):
-        # ✅ Separate input_ids và labels
-        input_ids = [feature["input_ids"] for feature in features]
-        labels = [feature["labels"] for feature in features]
-        attention_mask = [feature.get("attention_mask") for feature in features if feature.get("attention_mask") is not None]
-        
-        # ✅ CHUẨN: Pad input_ids
-        batch_input_ids = self.tokenizer.pad(
-            {"input_ids": input_ids},
-            padding=True,
-            max_length=None,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt"
-        )
-        
-        # ✅ CHUẨN: Pad labels
-        batch_labels = self.tokenizer.pad(
-            {"input_ids": labels},
-            padding=True,
-            max_length=None,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt"
-        )
-        
-        # ✅ T5 CHUẨN: Replace padding token ids với -100
-        batch_labels["input_ids"] = batch_labels["input_ids"].masked_fill(
-            batch_labels["input_ids"] == self.tokenizer.pad_token_id, -100
-        )
-        
-        return {
-            "input_ids": batch_input_ids["input_ids"],
-            "attention_mask": batch_input_ids["attention_mask"],
-            "labels": batch_labels["input_ids"]
-        }
-
-# ✅ TẠO DATASETS VÀ DATALOADERS CHUẨN
-train_dataset = ViLegalJEREDataset(train_data, tokenizer, max_source_length, max_target_length)
-val_dataset = ViLegalJEREDataset(val_data, tokenizer, max_source_length, max_target_length)
-
-# ✅ CHUẨN DATA COLLATOR
-data_collator = T5DataCollator(tokenizer)
-
-# ✅ CHUẨN PYTORCH DATALOADERS
-train_dataloader = torch.utils.data.DataLoader(
-    train_dataset,
-    batch_size=batch_size,
-    shuffle=True,
-    collate_fn=data_collator,
-    num_workers=0,  # Set to 0 for Kaggle compatibility
-    pin_memory=True if device_type == 'cuda' else False
-)
-
-val_dataloader = torch.utils.data.DataLoader(
-    val_dataset,
-    batch_size=batch_size,
-    shuffle=False,
-    collate_fn=data_collator,
-    num_workers=0,
-    pin_memory=True if device_type == 'cuda' else False
-)
-
-# ✅ BUILT-IN GET_BATCH FUNCTION CHUẨN
 def get_batch(split):
-    """Chuẩn built-in get_batch sử dụng DataLoader"""
-    dataloader = train_dataloader if split == 'train' else val_dataloader
+    """Get batch for fine-tuning with structured input/output"""
+    data = train_data if split == 'train' else val_data
+    if not data:
+        raise ValueError(f"Data split '{split}' is empty. Check data loading.")
+
+    # ✅ IMPROVED FINE-TUNING BATCH PROCESSING
+    ix = np.random.randint(len(data), size=(batch_size,))
+    batch_pairs = [data[i] for i in ix]
     
-    # ✅ Get next batch từ dataloader
-    try:
-        if not hasattr(get_batch, f'{split}_iter'):
-            setattr(get_batch, f'{split}_iter', iter(dataloader))
-        
-        batch = next(getattr(get_batch, f'{split}_iter'))
-    except StopIteration:
-        # ✅ Reset iterator khi hết epoch
-        setattr(get_batch, f'{split}_iter', iter(dataloader))
-        batch = next(getattr(get_batch, f'{split}_iter'))
+    # Extract source and target texts
+    source_texts = [pair[0] for pair in batch_pairs]
+    target_texts = [pair[1] for pair in batch_pairs]
     
-    # ✅ Move to device efficiently
+    # ✅ T5 STANDARD: Follow exact T5 documentation format
+    # Encode inputs exactly like T5 docs
+    input_encoding = tokenizer(
+        source_texts,
+        padding='longest',
+        max_length=max_source_length,
+        truncation=True,
+        return_tensors="pt"
+    )
+    input_ids = input_encoding.input_ids
+    attention_mask = input_encoding.attention_mask
+    
+    # Encode targets exactly like T5 docs  
+    target_encoding = tokenizer(
+        target_texts,
+        padding='longest',
+        max_length=max_target_length,
+        truncation=True,
+        return_tensors="pt"
+    )
+    labels = target_encoding.input_ids
+    
+    # ✅ T5 STANDARD: Replace padding token ids with -100 (exact T5 docs method)
+    # From docs: "replace padding token id's of the labels by -100"
+    labels = [
+        [(label if label != tokenizer.pad_token_id else -100) for label in labels_example] 
+        for labels_example in labels
+    ]
+    labels = torch.tensor(labels)
+
+    # ✅ EFFICIENT GPU transfer
     if device_type == 'cuda':
-        input_ids = batch['input_ids'].to(device, non_blocking=True)
-        attention_mask = batch['attention_mask'].to(device, non_blocking=True)
-        labels = batch['labels'].to(device, non_blocking=True)
+        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
+        labels = labels.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
     else:
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
+        input_ids = input_ids.to(device)
+        labels = labels.to(device) 
+        attention_mask = attention_mask.to(device)
     
     return input_ids, labels, attention_mask
 
