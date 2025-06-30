@@ -1,148 +1,218 @@
+import os
+from sympy import quo
 import torch
-import json
-from transformers import AutoTokenizer
 from model.ViLegalJERE import ViLegalJERE
+from utils import load_custom_tokenizer
 
-# ✅ FIXED: Custom tokenizer with domain tokens
-def load_custom_tokenizer():
-    """Load custom trained tokenizer with domain-specific tokens"""
+def load_finetuned_model(finetune_dir, device='cuda'):
+    """Load finetuned ViLegalJERE model from checkpoint directory"""
+    if not os.path.exists(finetune_dir):
+        raise FileNotFoundError(f"Finetune directory not found: {finetune_dir}")
     
-    # Load base tokenizer
-    tokenizer = AutoTokenizer.from_pretrained('sonny36/vilegaljere')
+    print(f"🔄 Loading finetuned model from {finetune_dir}")
     
-    # ✅ ADD domain-specific tokens for Vietnamese Legal JERE
-    domain_special_tokens = [
-        "<ORGANIZATION>", "<LOCATION>", "<DATE/TIME>", "<LEGAL_PROVISION>",
-        "<RIGHT/DUTY>", "<PERSON>", "<Effective_From>", "<Applicable_In>",
-        "<Relates_To>", "<Amended_By>"
-    ]
+    # Load model from pretrained checkpoint
+    model = ViLegalJERE.from_pretrained(finetune_dir)
+    model.to(device)
+    model.eval()  # Set to evaluation mode
     
-    # Add special tokens to tokenizer
-    special_tokens_dict = {'additional_special_tokens': domain_special_tokens}
-    num_added_toks = tokenizer.add_special_tokens(special_tokens_dict)
-    
-    print(f"✅ Added {num_added_toks} domain-specific tokens")
-    print(f"📊 New vocab size: {len(tokenizer)}")
-    
-    # ✅ VERIFY tokens were added correctly
-    for token in domain_special_tokens:
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        print(f"  {token}: {token_id}")
-    
-    return tokenizer
-
-# Initialize tokenizer with domain tokens
-tokenizer = load_custom_tokenizer()
-
-def load_model_and_tokenizer(model_path="/kaggle/working/out_vilegal_t5small"):
-    """Load finetuned model and tokenizer"""
-    try:
-        model = ViLegalJERE.from_pretrained(model_path)
-        tokenizer = load_custom_tokenizer()
-        model.eval()
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model.to(device)
-        print(f"Model loaded successfully on {device}")
-        print(f"Model vocab size: {model.config.vocab_size}")
-        print(f"Tokenizer vocab size: {len(tokenizer)}")
-        return model, tokenizer, device
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return None, None, None
+    print("✅ Finetuned model loaded successfully!")
+    return model
 
 def generate_relations(model, tokenizer, device, context_text, max_length=512):
-    """Generate relation extraction from context"""
-    # Tokenize input (encoder input)
-    inputs = tokenizer(
-        context_text,
-        max_length=max_length,
-        truncation=True,
-        padding=True,
-        return_tensors="pt"
-    ).to(device)
+    """
+    Generate relations from Vietnamese legal context text
     
-    # Generate using the standard HuggingFace generate method
+    Args:
+        model: Finetuned ViLegalJERE model
+        tokenizer: Custom Vietnamese legal tokenizer
+        device: torch device (cuda/cpu)
+        context_text: Input Vietnamese legal text
+        max_length: Maximum generation length
+        
+    Returns:
+        str: Generated relations text
+    """
+    model.eval()
+    
     with torch.no_grad():
-        outputs = model.generate(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
+        # Tokenize input text
+        inputs = tokenizer(
+            context_text,
             max_length=max_length,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id
+            truncation=True,
+            padding=True,
+            return_tensors="pt"
         )
-    
-    # Decode output (skip the start token)
-    generated_text = tokenizer.decode(outputs[0, 1:], skip_special_tokens=True)
-    return generated_text
+        
+        # Move to device
+        input_ids = inputs['input_ids'].to(device)
+        attention_mask = inputs['attention_mask'].to(device)
+        
+        # Generate with T5 standard parameters
+        generated_ids = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=256,  # Target max length for relations
+            min_length=10,
+            num_beams=4,
+            early_stopping=True,
+            do_sample=False,
+            temperature=1.0,
+            repetition_penalty=1.2,
+            length_penalty=1.0,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            decoder_start_token_id=tokenizer.pad_token_id
+        )
+        
+        # Decode generated text
+        generated_text = tokenizer.decode(
+            generated_ids[0], 
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True
+        )
+        
+        return generated_text.strip()
 
-def test_model():
-    """Test model with 3 sample cases"""
-    model, tokenizer, device = load_model_and_tokenizer()
+def test_single_case(model, tokenizer, device, case_name, input_text, expected_target):
+    """Test a single case and return results"""
+    print(f"\n{'='*80}")
+    print(f"🧪 TEST CASE: {case_name}")
+    print(f"{'='*80}")
     
-    if model is None:
-        print("Failed to load model. Exiting...")
-        return
+    print("\n📝 INPUT TEXT:")
+    print("-" * 50)
+    print(input_text[:200] + "..." if len(input_text) > 200 else input_text)
     
-    # Test cases from your data
+    print("\n🎯 EXPECTED TARGET:")
+    print("-" * 50)
+    print(expected_target)
+    
+    print("\n🚀 Generating relations...")
+    
+    # Generate relations
+    result = generate_relations(
+        model=model,
+        tokenizer=tokenizer, 
+        device=device,
+        context_text=input_text,
+        max_length=512
+    )
+    
+    print("\n✨ GENERATED OUTPUT:")
+    print("-" * 50)
+    print(result)
+    
+    print("\n📊 COMPARISON:")
+    print("-" * 50)
+    print(f"Expected:  {expected_target}")
+    print(f"Generated: {result}")
+    
+    # Simple accuracy check
+    is_match = expected_target.strip() == result.strip()
+    if is_match:
+        print("\n✅ PERFECT MATCH!")
+    else:
+        print("\n❓ Different output - analyze model performance")
+    
+    return is_match, result
+
+def main():
+    """Multiple test cases for comprehensive model evaluation"""
+    # Configuration
+    finetune_dir = '/kaggle/working/vilegaljere_finetune'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Load tokenizer
+    print("📥 Loading custom tokenizer...")
+    tokenizer = load_custom_tokenizer(master_process=True)
+    
+    # Load finetuned model
+    model = load_finetuned_model(finetune_dir, device)
+    
+    # Test cases from training data
     test_cases = [
         {
-            "id": "54/2019/QH14__Dieu51",
-            "context": "Điều 51: Tham gia của nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài trên thị trường chứng khoán Việt Nam 1. Nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài khi tham gia đầu tư, hoạt động trên thị trường chứng khoán Việt Nam tuân thủ quy định về tỷ lệ sở hữu nước ngoài, điều kiện, trình tự, thủ tục đầu tư theo quy định của pháp luật về chứng khoán và thị trường chứng khoán. 2. Chính phủ quy định chi tiết tỷ lệ sở hữu nước ngoài, điều kiện, trình tự, thủ tục đầu tư, việc tham gia của nhà đầu tư nước ngoài, tổ chức kinh tế có vốn đầu tư nước ngoài trên thị trường chứng khoán Việt Nam.",
-            "expected": "<ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <LOCATION> thị trường chứng khoán Việt Nam <Relates_To> <LEGAL_PROVISION> pháp luật về chứng khoán và thị trường chứng khoán <LOCATION> thị trường chứng khoán Việt Nam <Relates_To> <ORGANIZATION> Chính phủ <ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <Relates_To> <ORGANIZATION> tổ chức kinh tế có vốn đầu tư nước ngoài <LOCATION> thị trường chứng khoán Việt Nam <Relates_To>"
+            "name": "legal_28 - Điều 5 BNNPTTN",
+            "input": "Điều 5 02/2014/TT-BNNPTTN quy định trình tự, thủ tục cấp và thu hồi giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi Các trường hợp phải đăng ký cấp Giấy xác nhận 1. Thực vật biến đổi gen mang sự kiện chuyển gen đơn lẻ (single transformation event) là kết quả của quá trình chuyển một gen quy định một tính trạng mong muốn bằng công nghệ chuyển gen. 2. Thực vật biến đổi gen mang sự kiện chuyển gen tổ hợp (vector stacked transformation event) là kết quả của quá trình chuyển từ hai hoặc nhiều gen quy định một hoặc nhiều tính trạng mong muốn bằng công nghệ chuyển gen.",
+            "target": "<LEGAL_PROVISION> Điều 5 02/2014/TT-BNNPTTN <LEGAL_PROVISION> giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi Các trường hợp phải đăng ký cấp Giấy xác nhận <Relates_To>"
         },
         {
-            "id": "59/2020/QH14__Dieu173", 
-            "context": "Điều 173: Trách nhiệm của Kiểm soát viên 1. Tuân thủ đúng pháp luật, Điều lệ công ty, nghị quyết Đại hội đồng cổ đông và đạo đức nghề nghiệp trong thực hiện quyền và nghĩa vụ được giao. 2. Thực hiện quyền và nghĩa vụ được giao một cách trung thực, cẩn trọng, tốt nhất nhằm bảo đảm lợi ích hợp pháp tối đa của công ty. 3. Trung thành với lợi ích của công ty và cổ đông; không lạm dụng địa vị, chức vụ và sử dụng thông tin, bí quyết, cơ hội kinh doanh, tài sản khác của công ty để tư lợi hoặc phục vụ lợi ích của tổ chức, cá nhân khác. 4. Nghĩa vụ khác theo quy định của Luật này và Điều lệ công ty. 5. Trường hợp vi phạm quy định tại các khoản 1, 2, 3 và 4 Điều này mà gây thiệt hại cho công ty hoặc người khác thì Kiểm soát viên phải chịu trách nhiệm cá nhân hoặc liên đới bồi thường thiệt hại đó. Thu nhập và lợi ích khác mà Kiểm soát viên có được do vi phạm phải hoàn trả cho công ty. 6. Trường hợp phát hiện có Kiểm soát viên vi phạm trong thực hiện quyền và nghĩa vụ được giao thì phải thông báo bằng văn bản đến Ban kiểm soát; yêu cầu người có hành vi vi phạm chấm dứt hành vi vi phạm và khắc phục hậu quả.",
-            "expected": "<RIGHT/DUTY> Tuân thủ đúng pháp luật, Điều lệ công ty, nghị quyết Đại hội đồng cổ đông và đạo đức nghề nghiệp trong thực hiện quyền và nghĩa vụ được giao <LEGAL_PROVISION> Điều 173 <Relates_To> <RIGHT/DUTY> Thực hiện quyền và nghĩa vụ được giao một cách trung thực, cẩn trọng, tốt nhất nhằm bảo đảm lợi ích hợp pháp tối đa của công ty <LEGAL_PROVISION> Điều 173 <Relates_To>"
+            "name": "legal_26 - Điều 3 BNNPTTN with ORGANIZATION",
+            "input": "Điều 3 02/2014/TT-BNNPTTN quy định trình tự, thủ tục cấp và thu hồi giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi Giải thích từ ngữ Trong Thông tư này các từ ngữ dưới đây được hiểu như sau: 1. Thực vật biến đổi gen là thực vật, mẫu vật di truyền, sản phẩm trực tiếp của thực vật mang một hoặc nhiều gen mới được tạo ra bằng công nghệ ADN tái tổ hợp. 2. Đánh giá rủi ro của thực vật biến đổi gen đối với sức khỏe con người và vật nuôi (sau đây gọi tắt là đánh giá rủi ro) là các hoạt động nhằm xác định nguy cơ tiềm ẩn và khả năng xảy ra rủi ro của thực vật biến đổi gen khi sử dụng làm thực phẩm, thức ăn chăn nuôi. 3. Sự kiện chuyển gen là kết quả của quá trình tái tổ hợp ADN mục tiêu vào một vị trí nhất định trong hệ gen của một loài cây để tạo ra một cây tương ứng mang gen mục tiêu. 4. Nước phát triển là nước có nền công nghệ sinh học tiên tiến trong nhóm các nước thuộc Tổ chức hợp tác và Phát triển kinh tế - OECD và nhóm các nước có nền kinh tế lớn G20. 5. Mã nhận diện duy nhất là mã do Tổ chức hợp tác và Phát triển kinh tế xác định cho từng sự kiện chuyển gen.",
+            "target": "<LEGAL_PROVISION> Điều 3 02/2014/TT-BNNPTTN <ORGANIZATION> Tổ chức hợp tác và Phát triển kinh tế <Relates_To>"
         },
         {
-            "id": "54/2019/QH14__Dieu63",
-            "context": "Điều 63: Bừ trừ và thanh toán giao dịch chứng khoán 1. Hoạt động bù trừ, xác định nghĩa vụ thanh toán tiền và chứng khoán được thực hiện thông qua Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam. 2. Thanh toán chứng khoán được thực hiện trên hệ thống tài khoản lưu ký tại Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam, thanh toán tiền giao dịch chứng khoán được thực hiện qua ngân hàng thanh toán và phải tuân thủ nguyên tắc chuyển giao chứng khoán đồng thời với thanh toán tiền. 3. Bộ trưởng Bộ Tài chính quy định các biện pháp xử lý trong trường hợp thành viên của Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam tạm thời mất khả năng thanh toán giao dịch chứng khoán.",
-            "expected": "<ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <LEGAL_PROVISION> Điều 63 <Relates_To> <ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <ORGANIZATION> ngân hàng thanh toán <Relates_To> <ORGANIZATION> Bộ Tài chính <ORGANIZATION> Tổng công ty lưu ký và bù trừ chứng khoán Việt Nam <Relates_To>"
+            "name": "legal_29 - Điều 6 BNNPTTN Simple",
+            "input": "Điều 6 02/2014/TT-BNNPTTN quy định trình tự, thủ tục cấp và thu hồi giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi Điều kiện cấp Giấy xác nhận Thực vật biến đổi gen được cấp Giấy xác nhận phải đáp ứng một trong các điều kiện sau: 1. Thực vật biến đổi gen được ít nhất 05 (năm) nước phát triển cho phép sử dụng làm thực phẩm, thức ăn chăn nuôi và chưa xảy ra rủi ro ở các nước đó.",
+            "target": "<LEGAL_PROVISION> 02/2014/TT-BNNPTTN <ORGANIZATION> BNNPTTN <Relates_To>"
+        },
+        {
+            "name": "legal_30 - Điều 7 BNNPTTN Document Reference",
+            "input": "Điều 7 02/2014/TT-BNNPTTN quy định trình tự, thủ tục cấp và thu hồi giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi Hồ sơ đăng ký cấp Giấy xác nhận 1. Số lượng hồ sơ: 03 (ba) bộ, gồm 01 (một) bản chính và 02 (hai) bản sao. 2. Trường hợp đăng ký cấp Giấy xác nhận cho đối tượng quy định tại khoản 1 Điều 6 của Thông tư này, hồ sơ bao gồm: a) Đơn đăng ký cấp Giấy xác nhận theo mẫu quy định tại Phụ lục 1 của Thông tư này;",
+            "target": "<LEGAL_PROVISION> 02/2014/TT-BNNPTTN <LEGAL_PROVISION> Thông tư này <Relates_To>"
+        },
+        {
+            "name": "legal_31 - Complex Multiple Relations",
+            "input": "Điều 7 02/2014/TT-BNNPTTN quy định trình tự, thủ tục cấp và thu hồi giấy xác nhận thực vật biến đổi gen đủ điều kiện sử dụng làm thực phẩm, thức ăn chăn nuôi 4. Trường hợp đăng ký cấp Giấy xác nhận cho đối tượng quy định tại khoản 2 Điều 5 của Thông tư này, hồ sơ bao gồm: a) Các tài liệu quy định tại khoản 2 Điều này (trường hợp đăng ký cấp Giấy xác nhận cho đối tượng quy định tại khoản 1 Điều 6 của Thông tư này); b) Các tài liệu quy định tại khoản 3 Điều này (trường hợp đăng ký cấp Giấy xác nhận cho đối tượng quy định tại khoản 2 Điều 6 của Thông tư này);",
+            "target": "<LEGAL_PROVISION> Điều 7 02/2014/TT-BNNPTTN <LEGAL_PROVISION> Thông tư này <Relates_To> <LEGAL_PROVISION> Điều 7 02/2014/TT-BNNPTTN <LEGAL_PROVISION> Thông tư này <Relates_To> <LEGAL_PROVISION> Điều 7 02/2014/TT-BNNPTTN <LEGAL_PROVISION> Thông tư này <Relates_To>"
         }
     ]
     
-    print("=" * 80)
-    print("TESTING FINETUNED ViLegalJERE MODEL")
-    print("=" * 80)
+    print("="*80)
+    print("🧪 VIETNAMESE LEGAL JERE COMPREHENSIVE TEST SUITE")
+    print("="*80)
     
-    for i, test_case in enumerate(test_cases, 1):
-        print(f"\n🧪 TEST CASE {i}: {test_case['id']}")
-        print("-" * 60)
+    # Track results
+    results = []
+    total_cases = len(test_cases)
+    perfect_matches = 0
+    
+    # Run all test cases
+    for i, case in enumerate(test_cases, 1):
+        print(f"\n🔥 Running Test {i}/{total_cases}")
         
-        print(f"📝 INPUT CONTEXT:")
-        print(f"{test_case['context'][:200]}...")
+        is_match, generated = test_single_case(
+            model, tokenizer, device,
+            case["name"],
+            case["input"], 
+            case["target"]
+        )
         
-        print(f"\n🎯 EXPECTED RELATIONS:")
-        print(f"{test_case['expected'][:150]}...")
+        results.append({
+            "name": case["name"],
+            "match": is_match,
+            "expected": case["target"],
+            "generated": generated
+        })
         
-        print(f"\n🤖 MODEL GENERATED:")
-        try:
-            generated = generate_relations(model, tokenizer, device, test_case['context'])
-            print(f"{generated}")
-            
-            # Simple evaluation
-            if generated and len(generated) > 10:
-                print(f"✅ Generation successful ({len(generated)} chars)")
-                
-                # Check if output contains expected patterns
-                has_entities = any(tag in generated for tag in ["<ORGANIZATION>", "<LOCATION>", "<RIGHT/DUTY>", "<LEGAL_PROVISION>"])
-                has_relations = "<Relates_To>" in generated
-                
-                if has_entities and has_relations:
-                    print(f"✅ Output format looks correct (has entities and relations)")
-                else:
-                    print(f"⚠️ Output format may be incorrect")
-            else:
-                print("❌ Generation failed or too short")
-                
-        except Exception as e:
-            print(f"❌ Generation error: {e}")
-        
-        print("\n" + "="*60)
+        if is_match:
+            perfect_matches += 1
+    
+    # Summary
+    print(f"\n{'='*80}")
+    print("📊 TEST SUMMARY")
+    print(f"{'='*80}")
+    print(f"✅ Perfect Matches: {perfect_matches}/{total_cases} ({perfect_matches/total_cases*100:.1f}%)")
+    print(f"❓ Different Outputs: {total_cases - perfect_matches}/{total_cases}")
+    
+    print("\n📋 DETAILED RESULTS:")
+    print("-" * 80)
+    for i, result in enumerate(results, 1):
+        status = "✅ MATCH" if result["match"] else "❌ DIFF"
+        print(f"{i}. {result['name'][:40]:40} | {status}")
+    
+    print(f"\n{'='*80}")
+    
+    if perfect_matches == total_cases:
+        print("🎉 ALL TESTS PASSED! Model is performing perfectly!")
+    elif perfect_matches > total_cases * 0.7:
+        print("👍 Model performing well! Some minor differences to investigate.")
+    else:
+        print("⚠️ Model needs improvement. Check training data and hyperparameters.")
+    
+    print(f"{'='*80}")
 
 if __name__ == "__main__":
-    test_model()
+    main()
