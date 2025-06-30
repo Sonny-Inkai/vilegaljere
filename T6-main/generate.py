@@ -121,7 +121,7 @@ def test_single_case(model, tokenizer, device, case_name, input_text, expected_t
 def main():
     """Multiple test cases for comprehensive model evaluation"""
     # Configuration
-    finetune_dir = '/kaggle/working/vilegaljere_finetune'
+    finetune_dir = '/kaggle/input/vilegaljere/vilegaljere_finetune'
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Load tokenizer
