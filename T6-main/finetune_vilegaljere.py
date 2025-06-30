@@ -502,9 +502,7 @@ while True:
                 "lr": lr,
                 "mfu": running_mfu*100,
             }
-            
-            log_dict["eval/generation_success"] = 1 if test_success else 0
-            
+                        
             wandb.log(log_dict, step=iter_num)
         
         if losses['val'] < best_val_loss or always_save_checkpoint:
