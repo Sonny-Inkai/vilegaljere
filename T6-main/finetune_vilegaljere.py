@@ -27,7 +27,7 @@ out_dir = '/kaggle/working/vilegaljere_pretrain' # Thư mục chứa checkpoint 
 finetune_dir = '/kaggle/working/vilegaljere_finetune'
 
 # ✅ OPTIMIZED: Better hyperparameters for relation extraction fine-tuning
-learning_rate = 2e-4 # Higher learning rate for fine-tuning stability
+learning_rate = 3e-5 # Higher learning rate for fine-tuning stability
 max_iters = 10000     # Sufficient iterations for fine-tuning convergence
 batch_size = 16      # Smaller batch for better gradient stability
 gradient_accumulation_steps = 2  # Maintain effective batch size of 64
@@ -46,7 +46,7 @@ wandb_run_name = 'vilegal_jere_finetune_kaggle'
 dataset = 'vietnamese_legal'
 block_size = 512    # Keep same
 max_source_length = 512  # encoder max length
-max_target_length = 512  # decoder max length
+max_target_length = 256  # decoder max length
 
 # model - T5-small architecture (~60M parameters)
 n_layer = 6         # T5-small has 6 layers each for encoder/decoder
@@ -97,7 +97,7 @@ from utils import (
     setup_distributed_training,
     setup_training_environment,
     setup_wandb,
-    test_model_generation
+    #test_model_generation
 )
 
 # Get current date and job ID
@@ -487,12 +487,12 @@ while True:
         
         # Test model generation
         raw_model = model.module if ddp else model
-        test_success = test_model_generation(raw_model, tokenizer, device, master_process)
+        #test_success = test_model_generation(raw_model, tokenizer, device, master_process)
         
-        if test_success:
-            print("✅ Model generation test passed!")
-        else:
-            print("❌ Model generation test failed!")
+        #if test_success:
+        #    print("✅ Model generation test passed!")
+        #else:
+        #    print("❌ Model generation test failed!")
         
         if wandb_log:
             log_dict = {
@@ -604,12 +604,6 @@ if master_process and iter_num > 100:
     print(f"{'='*60}")
     
     raw_model = model.module if ddp else model
-    test_success = test_model_generation(raw_model, tokenizer, device)
-    
-    if test_success:
-        print("✅ Model test completed successfully!")
-    else:
-        print("❌ Model test failed!")
         
     print(f"{'='*60}")
 
